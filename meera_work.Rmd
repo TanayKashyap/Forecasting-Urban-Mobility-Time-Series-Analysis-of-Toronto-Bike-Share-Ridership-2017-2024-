@@ -1,0 +1,43 @@
+---
+output:
+  pdf_document: default
+---
+
+Step 1: Loading in the Data
+
+```{r}
+# Packages used in tutorials
+library(MASS)      # boxcox
+library(car)       # qqPlot
+library(randtests) # runs.test
+# library(forecast) # OPTIONAL if you want auto.arima, not required
+
+bike <- read.csv("trips_per_day.csv")
+bike$trip_date <- as.Date(bike$trip_date)
+
+str(bike)
+head(bike)
+range(bike$trip_date)
+
+```
+Initial Plotting for Time Series
+
+```{r}
+# Sort just in case
+bike <- bike[order(bike$trip_date), ]
+
+# Extract response as a vector
+y <- bike$n_trips
+
+# Daily frequency with yearly seasonality (approx 365)
+bike_ts <- ts(
+  y,
+  start = c(as.numeric(format(min(bike$trip_date), "%Y")), 
+            as.numeric(format(min(bike$trip_date), "%j"))),
+  frequency = 365
+)
+
+plot(bike_ts, main = "Daily BikeShare Trips in Toronto", ylab = "Trips")
+
+```
+
