@@ -1,1 +1,31 @@
-hello mister
+Summary Table of Data
+```{r}
+# Summary of Data
+trips <- read.csv("trips_per_day.csv")
+```
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+
+trips <- trips %>%
+  mutate(trip_date = as.Date(trip_date))
+
+summary_table <- trips %>%
+  summarise(
+    time_span_start = min(trip_date, na.rm = TRUE),
+    time_span_end   = max(trip_date, na.rm = TRUE),
+    total_days      = n_distinct(trip_date),
+    total_trips     = sum(n_trips, na.rm = TRUE),
+    mean_trips      = mean(n_trips, na.rm = TRUE),
+    median_trips    = median(n_trips, na.rm = TRUE),
+    min_trips       = min(n_trips, na.rm = TRUE),
+    max_trips       = max(n_trips, na.rm = TRUE),
+    sd_trips        = sd(n_trips, na.rm = TRUE)
+  )
+```
+```{r}
+summary_table
+```
+
