@@ -99,4 +99,36 @@ if (lam == 0) {
 plot(y_trans, main = "Transformed Daily Trips", ylab = "Transformed trips")
 
 ```
+Classical Decomposition 
+```{r}
+Decomp_bike <- stl(y_trans, s.window = "periodic")
+plot(Decomp_bike, main = "STL Decomposition of Transformed Daily Trips")
+
+# Extract components if needed
+bike_seasonal <- Decomp_bike$time.series[, "seasonal"]
+bike_trend    <- Decomp_bike$time.series[, "trend"]
+bike_remainder <- Decomp_bike$time.series[, "remainder"]
+
+```
+```{r}
+tim   <- time(y_trans)
+month <- factor(format(bike$trip_date, "%m"))
+dow   <- factor(weekdays(bike$trip_date))  # optional, but nice
+
+# Simple model: linear trend + monthly seasonality
+reg1 <- lm(y_trans ~ tim + month)
+summary(reg1)
+
+```
+```{r}
+reg2 <- lm(y_trans ~ poly(tim, 2, raw = FALSE) + month)
+summary(reg2)
+```
+
+```{r}
+reg3 <- lm(y_trans ~ poly(tim, 2, raw = FALSE) + month + dow)
+summary(reg3)
+```
+
+
 
