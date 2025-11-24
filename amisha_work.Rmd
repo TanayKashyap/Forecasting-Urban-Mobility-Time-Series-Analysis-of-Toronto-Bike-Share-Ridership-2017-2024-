@@ -66,7 +66,7 @@ bike_ts <- ts(
   frequency = 365
 )
 
-plot(bike_ts, main = "Daily BikeShare Trips in Toronto", ylab = "Trips")
+plot(bike_ts, main = "Daily BikeShare Trips in Toronto", ylab = "Number of Trips")
 
 ```
 
@@ -74,11 +74,11 @@ Step 2: EDA
 
 ```{r}
 par(mfrow = c(1, 1))
-plot(bike_ts, main = "Daily Trips", ylab = "Trips")
+plot(bike_ts, main = "Daily Trips", ylab = "Number of Trips")
 
 # maybe a zoom on a couple of years
 plot(window(bike_ts, start = c(2019, 1), end = c(2021, 365)),
-     main = "Daily Trips: 2019–2021", ylab = "Trips")
+     main = "Daily Trips Between 2019–2021", ylab = "Number of Trips")
 
 ```
 
@@ -87,19 +87,24 @@ plot(window(bike_ts, start = c(2019, 1), end = c(2021, 365)),
 bike$trip_date <- as.Date(bike$trip_date)
 bike$n_month <- as.numeric(format(bike$trip_date, "%m"))
 bike$month <- factor(bike$n_month, levels = 1:12, labels = month.abb)
-boxplot(n_trips ~ month, data = bike)
+boxplot(n_trips ~ month, data = bike,
+        main = "Boxplot of Annual BikeShare Trips", ylab = "Number of Trips",
+        xlab = "Month", col = "steelblue")
 ```
 
 
 Confirming Seasonality with ACF and Spectrum
 
 ```{r}
-acf(as.vector(bike_ts), lag.max = 400,
-    main = "ACF of Daily Trips")
+acf(as.vector(bike_ts), lag.max = 100,
+    main = "ACF of Daily Trips", col = "steelblue")
 spec_bike <- spectrum(as.vector(bike_ts), spans = 5)
 1 / spec_bike$freq[which.max(spec_bike$spec)]  # estimated period
 
 ```
+In the ACF plot above, as the lag increases, we see the ACF gradually 
+decreasing indicating that there is some sort of trend present in our data.
+
 Step 3: Box-Cox transformation 
 
 ```{r}
@@ -134,7 +139,8 @@ if (lam == 0) {
   y_trans <- -(bike_ts^lam)
 }
 
-plot(y_trans, main = "Transformed Daily Trips", ylab = "Transformed trips")
+plot(y_trans, main = "Transformed Daily Trips", ylab = "Transformed trips",
+     xlab = "Time (Year)", col = "steelblue")
 
 ```
 Classical Decomposition 
@@ -178,7 +184,7 @@ mod_base <- lm(y_trans ~ tim + month, data = model_data)
 
 # PLOT 0: Base Model
 plot(model_data$tim, model_data$y_trans, type = "l", col = "gray",
-     main = "Model 0: Monthly Seasonality Only", ylab = "Transformed Trips", xlab = "Time")
+     main = "Model 0: Monthly Seasonality Only", ylab = "Transformed Trips", xlab = "Time (Year)")
 lines(model_data$tim, fitted(mod_base), col = "red", lwd = 1)
 legend("topleft", legend = c("Data", "Fit (Month only)"), col = c("gray", "red"), lty = 1, bty = "n")
 ```
@@ -189,7 +195,7 @@ mod_weekend <- lm(y_trans ~ tim + month + is_weekend, data = model_data)
 
 # PLOT 1: Weekend Model
 plot(model_data$tim, model_data$y_trans, type = "l", col = "gray",
-     main = "Model 1: Month + Weekend Indicator", ylab = "Transformed Trips", xlab = "Time")
+     main = "Model 1: Month + Weekend Indicator", ylab = "Transformed Trips", xlab = "Time (Year)")
 lines(model_data$tim, fitted(mod_weekend), col = "blue", lwd = 1)
 legend("topleft", legend = c("Data", "Fit (Month + Weekend)"), col = c("gray", "blue"), lty = 1, bty = "n")
 ```
@@ -202,7 +208,7 @@ mod_weekday <- lm(y_trans ~ tim + month + weekday, data = model_data)
 # We zoom in on a shorter window (e.g., first year) for this plot 
 # because the daily wiggle is hard to see on the full plot
 plot(model_data$tim, model_data$y_trans, type = "l", col = "gray",
-     main = "Model 2: Month + Full Weekday (First Year Zoom)", ylab = "Transformed Trips", xlab = "Time")
+     main = "Model 2: Month + Full Weekday (First Year Zoom)", ylab = "Transformed Trips", xlab = "Time (Year)")
 lines(model_data$tim, fitted(mod_weekday), col = "darkgreen", lwd = 1)
 legend("topleft", legend = c("Data", "Fit (Month + Weekday)"), col = c("gray", "darkgreen"), lty = 1, bty = "n")
 ```
@@ -212,7 +218,10 @@ legend("topleft", legend = c("Data", "Fit (Month + Weekday)"), col = c("gray", "
 anova(mod_base, mod_weekend)
 anova(mod_weekend, mod_weekday)
 AIC(mod_base, mod_weekend, mod_weekday)
+BIC(mod_base, mod_weekend, mod_weekday)
 ```
+Including both AIC and BIC but focus more on BIC since it has a greater/harsher penalty 
+factor for more parameters.
 ```{r}
 # --- Manual Time Series Cross-Validation ---
 
@@ -271,7 +280,7 @@ for (deg in degrees) {
 # 3. Visualize Results
 results_ts_cv <- data.frame(Degree = degrees, MSE = cv_mse)
 
-plot(results_ts_cv$Degree, results_ts_cv$MSE, type = "b", col = "blue", pch = 19,
+plot(results_ts_cv$Degree, results_ts_cv$MSE, type = "b", col = "steelblue", pch = 19,
      main = "Time Series Cross-Validation Error",
      xlab = "Polynomial Degree", ylab = "Mean Squared Error")
 
@@ -329,7 +338,7 @@ abline(h = 0, lty = 2, col = "red", lwd = 2)
 # Plot E: ACF of Residuals
 # Checks for Independence (bars should stay inside blue lines)
 acf(residuals(final_model), 
-    lag.max = 365, # Check up to a year of lags to see long-term correlation
+    lag.max = 40,
     main = "ACF of Residuals")
 
 # --- 3. Statistical Tests ---
@@ -349,4 +358,71 @@ print("--- Runs Test for Randomness ---")
 print(randtests::runs.test(residuals(final_model)))
 ```
 
+##redo for removing seaosnlaity trail 2
+```{r}
+# --- 1. Refit the Winner (Degree 2) on Full Data ---
+final_model2 <- lm(y_trans ~ poly(tim, 2, raw = FALSE) + month + weekday + month*weekday, data = model_data)
+summary(final_model2)
 
+# --- 2. Diagnostic Plots (Generated One by One) ---
+
+# Plot A: Histogram of Residuals
+# Checks if the noise is roughly Bell-shaped
+hist(final_model2$residuals, 
+     breaks = 30, 
+     col = "lightblue", 
+     main = "Histogram of Residuals", 
+     xlab = "Residuals")
+box() # Adds a nice border
+
+# Plot B: Q-Q Plot
+# Checks for Normality (points should hug the blue line)
+car::qqPlot(final_model2$residuals, 
+            pch = 16, 
+            col = adjustcolor("black", 0.7),
+            main = "Normal Q-Q Plot",
+            xlab = "Theoretical Quantiles", 
+            ylab = "Sample Quantiles")
+
+# Plot C: Fitted Values vs. Residuals
+# Checks for Homoscedasticity (spread should be constant, no funnel shape)
+plot(fitted(final_model2), residuals(final_model2), 
+     pch = 16, 
+     col = adjustcolor("black", 0.4),
+     main = "Residuals vs. Fitted Values", 
+     xlab = "Fitted Values", 
+     ylab = "Residuals")
+abline(h = 0, lty = 2, col = "red", lwd = 2)
+
+# Plot D: Residuals vs. Time
+# Checks if variance changes over time or if there are bursts of volatility
+plot(residuals(final_model2), 
+     pch = 16, 
+     col = adjustcolor("black", 0.4),
+     main = "Residuals vs. Time", 
+     xlab = "Time Index", 
+     ylab = "Residuals")
+abline(h = 0, lty = 2, col = "red", lwd = 2)
+
+# Plot E: ACF of Residuals
+# Checks for Independence (bars should stay inside blue lines)
+acf(residuals(final_model2), 
+    lag.max = 40,
+    main = "ACF of Residuals")
+
+# --- 3. Statistical Tests ---
+print("--- Shapiro-Wilk Test for Normality ---")
+# Limit to 5000 samples because shapiro.test() has a hard limit
+if(length(residuals(final_model2)) > 5000) {
+  print(shapiro.test(residuals(final_model2)[1:5000]))
+} else {
+  print(shapiro.test(residuals(final_model2)))
+}
+
+print("--- Kolmogorov-Smirnov Test for Normality ---")
+print(ks.test(scale(residuals(final_model2)), "pnorm"))
+
+print("--- Runs Test for Randomness ---")
+# Checks if residuals have random sign flips
+print(randtests::runs.test(residuals(final_model2)))
+```
