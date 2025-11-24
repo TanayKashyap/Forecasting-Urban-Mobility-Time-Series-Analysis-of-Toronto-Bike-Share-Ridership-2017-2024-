@@ -3,6 +3,19 @@ output:
   pdf_document: default
 ---
 
+```{r setup, include=FALSE}
+# This chunk runs first!
+knitr::opts_chunk$set(echo = TRUE)
+# Load libraries HERE so they are available for all subsequent chunks
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(MASS)
+library(car)
+library(randtests)
+# library(forecast)
+```
+
 Step 1: Loading in the Data
 
 ```{r}
@@ -13,7 +26,16 @@ library(randtests) # runs.test
 # library(forecast) # OPTIONAL if you want auto.arima, not required
 
 bike <- read.csv("trips_per_day.csv")
+bike <- bike %>%
+  filter(!is.na(trip_date))
+
 bike$trip_date <- as.Date(bike$trip_date)
+
+# Filter the bike dataframe to keep only trips from 2017 onwards
+bike <- bike[bike$trip_date >= as.Date("2017-01-01"), ]
+
+# Verify the new range
+range(bike$trip_date)
 
 str(bike)
 head(bike)
@@ -111,24 +133,310 @@ bike_remainder <- Decomp_bike$time.series[, "remainder"]
 
 ```
 ```{r}
-tim   <- time(y_trans)
-month <- factor(format(bike$trip_date, "%m"))
-dow   <- factor(weekdays(bike$trip_date))  # optional, but nice
+# --- Feature Engineering ---
+# Time Index
+tim <- time(bike_ts) 
 
-# Simple model: linear trend + monthly seasonality
-reg1 <- lm(y_trans ~ tim + month)
-summary(reg1)
+# Seasonal Factors
+month <- factor(format(bike$trip_date, "%m")) 
+weekday_num <- as.numeric(format(bike$trip_date, "%u")) # 1=Mon, ..., 7=Sun
+weekday <- factor(weekday_num)
+is_weekend <- factor(ifelse(weekday_num >= 6, "Weekend", "Weekday"))
 
+# Dataframe
+model_data <- data.frame(
+  y_trans = as.numeric(y_trans),
+  tim = as.numeric(tim),
+  month = month,
+  weekday = weekday,
+  is_weekend = is_weekend
+)
+```
+
+
+```{r}
+# --- Visualizing the Seasonality Tests ---
+
+# Model 0: Base (Trend + Month Only)
+mod_base <- lm(y_trans ~ tim + month, data = model_data)
+
+# PLOT 0: Base Model
+plot(model_data$tim, model_data$y_trans, type = "l", col = "gray",
+     main = "Model 0: Monthly Seasonality Only", ylab = "Transformed Trips", xlab = "Time")
+lines(model_data$tim, fitted(mod_base), col = "red", lwd = 1)
+legend("topleft", legend = c("Data", "Fit (Month only)"), col = c("gray", "red"), lty = 1, bty = "n")
+```
+
+```{r}
+# Model 1: Weekend (Trend + Month + Weekend Indicator)
+mod_weekend <- lm(y_trans ~ tim + month + is_weekend, data = model_data)
+
+# PLOT 1: Weekend Model
+plot(model_data$tim, model_data$y_trans, type = "l", col = "gray",
+     main = "Model 1: Month + Weekend Indicator", ylab = "Transformed Trips", xlab = "Time")
+lines(model_data$tim, fitted(mod_weekend), col = "blue", lwd = 1)
+legend("topleft", legend = c("Data", "Fit (Month + Weekend)"), col = c("gray", "blue"), lty = 1, bty = "n")
+```
+
+```{r}
+# Model 2: Full Weekday (Trend + Month + Full Weekday)
+mod_weekday <- lm(y_trans ~ tim + month + weekday, data = model_data)
+
+# PLOT 2: Weekday Model
+# We zoom in on a shorter window (e.g., first year) for this plot 
+# because the daily wiggle is hard to see on the full plot
+plot(model_data$tim, model_data$y_trans, type = "l", col = "gray",
+     main = "Model 2: Month + Full Weekday (First Year Zoom)", ylab = "Transformed Trips", xlab = "Time")
+lines(model_data$tim, fitted(mod_weekday), col = "darkgreen", lwd = 1)
+legend("topleft", legend = c("Data", "Fit (Month + Weekday)"), col = c("gray", "darkgreen"), lty = 1, bty = "n")
 ```
 ```{r}
-reg2 <- lm(y_trans ~ poly(tim, 2, raw = FALSE) + month)
-summary(reg2)
+# --- Hypothesis Testing ---
+# Now you perform the tests to confirm what you see in the plots
+anova(mod_base, mod_weekend)
+anova(mod_weekend, mod_weekday)
+AIC(mod_base, mod_weekend, mod_weekday)
 ```
+```{r}
+# --- Manual Time Series Cross-Validation ---
+
+# 1. Setup
+n_total <- length(bike_ts)
+min_train <- 365 * 2  # Start training after 2 years of data
+horizon <- 1          # One-step ahead forecast
+
+# We will test degrees 1 to 6
+degrees <- 1:6
+cv_mse <- numeric(length(degrees))
+
+# Time index and Monthly dummies for the WHOLE dataset first
+# (It's safe to create predictors beforehand as they are deterministic)
+time_idx <- 1:n_total
+month_fac <- factor(cycle(bike_ts)) # 1 to 12
+
+# Prepare the master dataframe
+data_full <- data.frame(y = as.numeric(bike_ts), t = time_idx, month = month_fac)
+
+# Loop through degrees
+for (deg in degrees) {
+  
+  errors <- c()
+  
+  # 2. Rolling Loop
+  # We slide the cutoff "i" from min_train to (n_total - 1)
+  # This might be slow if n is large. For 2000 points it's fine.
+  # To speed up, you can step by 30 days (monthly rolling) instead of 1 day.
+  
+  for (i in seq(min_train, n_total - 1, by = 30)) { # Jumping by 30 days for speed
+    
+    # Train set: 1 to i
+    train_set <- data_full[1:i, ]
+    
+    # Test set: i+1
+    test_set <- data_full[(i + 1), , drop = FALSE] # drop=FALSE keeps it a dataframe
+    
+    # Fit model on Train
+    # Note: raw=TRUE is critical here so the coefficients mean something stable
+    fit <- lm(y ~ poly(t, deg, raw = TRUE) + month, data = train_set)
+    
+    # Predict on Test
+    pred <- predict(fit, newdata = test_set)
+    
+    # Calculate Squared Error
+    err <- (test_set$y - pred)^2
+    errors <- c(errors, err)
+  }
+  
+  # Average MSE for this degree
+  cv_mse[deg] <- mean(errors)
+  print(paste("Degree", deg, "MSE:", round(cv_mse[deg], 4)))
+}
+
+# 3. Visualize Results
+results_ts_cv <- data.frame(Degree = degrees, MSE = cv_mse)
+
+plot(results_ts_cv$Degree, results_ts_cv$MSE, type = "b", col = "blue", pch = 19,
+     main = "Time Series Cross-Validation Error",
+     xlab = "Polynomial Degree", ylab = "Mean Squared Error")
+
+best_d <- which.min(cv_mse)
+points(best_d, cv_mse[best_d], col = "red", cex = 2, pch = 1)
+text(best_d, cv_mse[best_d], paste("Best:", best_d), pos = 3, col = "red")
+```
+
+
 
 ```{r}
-reg3 <- lm(y_trans ~ poly(tim, 2, raw = FALSE) + month + dow)
-summary(reg3)
-```
+# --- Define the range of degrees to test ---
+max_degree <- 10 # You can go higher if you want, but 6-8 is usually enough
+output <- data.frame(Degree = integer(), AdjR2 = double(), AIC = double(), BIC = double(), CV_MSE = double())
 
+# --- Setup for Cross-Validation ---
+set.seed(443) # For reproducibility
+n <- nrow(model_data)
+k_folds <- 5
+# Create random fold assignments
+folds <- sample(rep(1:k_folds, length.out = n))
+
+for (p in 1:max_degree) {
+  
+  # 1. Fit model on FULL data to get AIC/BIC/AdjR2
+  full_mod <- lm(y_trans ~ poly(tim, p, raw = FALSE) + month + weekday, data = model_data)
+  
+  # 2. Cross-Validation Loop
+  cv_errors <- numeric(k_folds)
+  for (k in 1:k_folds) {
+    # Split data
+    test_idx <- which(folds == k)
+    train_data <- model_data[-test_idx, ]
+    test_data  <- model_data[test_idx, ]
+    
+    # Fit on Train
+    train_mod <- lm(y_trans ~ poly(tim, p, raw = FALSE) + month + weekday, data = train_data)
+    
+    # Predict on Test
+    pred_test <- predict(train_mod, newdata = test_data)
+    
+    # Calc MSE
+    cv_errors[k] <- mean((test_data$y_trans - pred_test)^2)
+  }
+  
+  # 3. Store Results
+  output[p, ] <- c(p, 
+                   summary(full_mod)$adj.r.squared, 
+                   AIC(full_mod), 
+                   BIC(full_mod), 
+                   mean(cv_errors))
+}
+
+# --- View the Selection Table ---
+print(round(output, 4))
+
+# --- Plot CV Error to find the minimum ---
+plot(output$Degree, output$CV_MSE, type = 'b', pch = 16, col = "blue",
+     main = "Cross-Validation Error by Trend Degree",
+     xlab = "Polynomial Degree (p)", ylab = "Mean Squared Error")
+# Mark the best one
+best_p <- which.min(output$CV_MSE)
+points(best_p, output$CV_MSE[best_p], col = "red", pch = 16, cex = 1.5)
+text(best_p, output$CV_MSE[best_p], labels = paste("Best p =", best_p), pos = 3, col = "red")
+```
+```{r}
+# --- APSE with Temporal Split (The "Honest" Test) ---
+
+# 1. Split Data into Training (Past) and Test (Recent Future)
+# Let's hold out the last 365 days as our "Test Set"
+n_total <- nrow(model_data)
+n_test <- 365
+n_train <- n_total - n_test
+
+train_data <- model_data[1:n_train, ]
+test_data  <- model_data[(n_train + 1):n_total, ]
+
+# 2. Loop through degrees and check forecasting error
+max_degree <- 8 # Feel free to check up to 8 or 10
+apse_results <- numeric(max_degree)
+
+par(mfrow = c(1,1))
+# Plot the test data to set up the canvas
+plot(test_data$tim, test_data$y_trans, type = "l", col = "black", lwd = 2,
+     main = "Forecasting Performance on Hold-out Set (Last 365 Days)",
+     xlab = "Time", ylab = "Transformed Trips",
+     ylim = range(model_data$y_trans))
+
+colors <- rainbow(max_degree)
+
+for (p in 1:max_degree) {
+  # Fit ONLY on Training Data
+  mod <- lm(y_trans ~ poly(tim, p, raw = FALSE) + month + weekday, data = train_data)
+  
+  # Predict on Test Data
+  pred <- predict(mod, newdata = test_data)
+  
+  # Calculate APSE (Mean Squared Error on the Test Set)
+  apse_results[p] <- mean((test_data$y_trans - pred)^2)
+  
+  # Add line to plot to visualize the "Explosion"
+  lines(test_data$tim, pred, col = colors[p], lwd = 1)
+}
+
+legend("topleft", legend = paste("Degree", 1:max_degree), col = colors, lty = 1, cex = 0.8)
+
+# 3. Print the Results
+results_table <- data.frame(Degree = 1:max_degree, APSE = apse_results)
+print(results_table)
+
+# Plot APSE scores
+plot(results_table$Degree, results_table$APSE, type = "b", pch = 19, col = "red",
+     main = "APSE vs Polynomial Degree", xlab = "Degree", ylab = "Prediction Error (APSE)")
+points(which.min(apse_results), min(apse_results), cex = 2, col = "blue")
+```
+```{r}
+# --- 1. Refit the Winner (Degree 2) on Full Data ---
+final_model <- lm(y_trans ~ poly(tim, 2, raw = FALSE) + month + weekday, data = model_data)
+summary(final_model)
+
+# --- 2. Diagnostic Plots (Generated One by One) ---
+
+# Plot A: Histogram of Residuals
+# Checks if the noise is roughly Bell-shaped
+hist(final_model$residuals, 
+     breaks = 30, 
+     col = "lightblue", 
+     main = "Histogram of Residuals", 
+     xlab = "Residuals")
+box() # Adds a nice border
+
+# Plot B: Q-Q Plot
+# Checks for Normality (points should hug the blue line)
+car::qqPlot(final_model$residuals, 
+            pch = 16, 
+            col = adjustcolor("black", 0.7),
+            main = "Normal Q-Q Plot",
+            xlab = "Theoretical Quantiles", 
+            ylab = "Sample Quantiles")
+
+# Plot C: Fitted Values vs. Residuals
+# Checks for Homoscedasticity (spread should be constant, no funnel shape)
+plot(fitted(final_model), residuals(final_model), 
+     pch = 16, 
+     col = adjustcolor("black", 0.4),
+     main = "Residuals vs. Fitted Values", 
+     xlab = "Fitted Values", 
+     ylab = "Residuals")
+abline(h = 0, lty = 2, col = "red", lwd = 2)
+
+# Plot D: Residuals vs. Time
+# Checks if variance changes over time or if there are bursts of volatility
+plot(residuals(final_model), 
+     pch = 16, 
+     col = adjustcolor("black", 0.4),
+     main = "Residuals vs. Time", 
+     xlab = "Time Index", 
+     ylab = "Residuals")
+abline(h = 0, lty = 2, col = "red", lwd = 2)
+
+# Plot E: ACF of Residuals
+# Checks for Independence (bars should stay inside blue lines)
+acf(residuals(final_model), 
+    lag.max = 365, # Check up to a year of lags to see long-term correlation
+    main = "ACF of Residuals")
+
+# --- 3. Statistical Tests ---
+print("--- Shapiro-Wilk Test for Normality ---")
+# Limit to 5000 samples because shapiro.test() has a hard limit
+if(length(residuals(final_model)) > 5000) {
+  print(shapiro.test(residuals(final_model)[1:5000]))
+} else {
+  print(shapiro.test(residuals(final_model)))
+}
+
+print("--- Kolmogorov-Smirnov Test for Normality ---")
+print(ks.test(scale(residuals(final_model)), "pnorm"))
+
+print("--- Runs Test for Randomness ---")
+# Checks if residuals have random sign flips
+print(randtests::runs.test(residuals(final_model)))
+```
 
 
