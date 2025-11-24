@@ -11,10 +11,342 @@ knitr::opts_chunk$set(echo = TRUE)
 
 
 ```{r}
-trip_data <- read.csv("trips_per_day.csv") 
-trip_data$trip_date <- as.Date(trip_data$trip_date)
-trip_data$n_month <- as.numeric(format(trip_data$trip_date, "%m"))
-trip_data$month <- factor(trip_data$n_month, levels = 1:12, labels = month.abb)
-boxplot(n_trips ~ month, data = trip_data)
+# This chunk runs first!
+knitr::opts_chunk$set(echo = TRUE)
+# Load libraries HERE so they are available for all subsequent chunks
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(MASS)
+library(car)
+library(randtests)
+# library(forecast)
+```
+
+Step 1: Loading in the Data
+
+```{r}
+# Packages used in tutorials
+library(MASS)      # boxcox
+library(car)       # qqPlot
+library(randtests) # runs.test
+# library(forecast) # OPTIONAL if you want auto.arima, not required
+
+bike <- read.csv("trips_per_day.csv")
+bike <- bike %>%
+  filter(!is.na(trip_date))
+
+bike$trip_date <- as.Date(bike$trip_date)
+
+# Filter the bike dataframe to keep only trips from 2017 onwards
+bike <- bike[bike$trip_date >= as.Date("2017-01-01"), ]
+
+# Verify the new range
+range(bike$trip_date)
+
+str(bike)
+head(bike)
+range(bike$trip_date)
 
 ```
+Initial Plotting for Time Series
+
+```{r}
+# Sort just in case
+bike <- bike[order(bike$trip_date), ]
+
+# Extract response as a vector
+y <- bike$n_trips
+
+# Daily frequency with yearly seasonality (approx 365)
+bike_ts <- ts(
+  y,
+  start = c(as.numeric(format(min(bike$trip_date), "%Y")), 
+            as.numeric(format(min(bike$trip_date), "%j"))),
+  frequency = 365
+)
+
+plot(bike_ts, main = "Daily BikeShare Trips in Toronto", ylab = "Trips")
+
+```
+
+Step 2: EDA 
+
+```{r}
+par(mfrow = c(1, 1))
+plot(bike_ts, main = "Daily Trips", ylab = "Trips")
+
+# maybe a zoom on a couple of years
+plot(window(bike_ts, start = c(2019, 1), end = c(2021, 365)),
+     main = "Daily Trips: 2019–2021", ylab = "Trips")
+
+```
+
+```{r}
+#trip_data <- read.csv("trips_per_day.csv") 
+bike$trip_date <- as.Date(bike$trip_date)
+bike$n_month <- as.numeric(format(bike$trip_date, "%m"))
+bike$month <- factor(bike$n_month, levels = 1:12, labels = month.abb)
+boxplot(n_trips ~ month, data = bike)
+```
+
+
+Confirming Seasonality with ACF and Spectrum
+
+```{r}
+acf(as.vector(bike_ts), lag.max = 400,
+    main = "ACF of Daily Trips")
+spec_bike <- spectrum(as.vector(bike_ts), spans = 5)
+1 / spec_bike$freq[which.max(spec_bike$spec)]  # estimated period
+
+```
+Step 3: Box-Cox transformation 
+
+```{r}
+# Simple intercept-only model (like in tutorial)
+bc_model_raw <- lm(bike_ts ~ 1)
+boxcox_raw   <- MASS::boxcox(bc_model_raw, lambda = seq(-2, 2, 0.1))
+(lambda_opt_raw <- boxcox_raw$x[which.max(boxcox_raw$y)])
+
+```
+
+```{r}
+tim <- time(bike_ts)  # continuous time index
+
+# Season: year and day-of-year or month; simplest is month
+# Build a monthly factor from dates (instead of cycle, since this is daily)
+month <- factor(format(bike$trip_date, "%m"))
+
+reg_for_bc <- lm(bike_ts ~ tim + month)
+boxcox_mod <- MASS::boxcox(reg_for_bc, lambda = seq(-2, 2, 0.1))
+(lambda_opt_mod <- boxcox_mod$x[which.max(boxcox_mod$y)])
+
+```
+```{r}
+lam <- lambda_opt_mod   # keep this for later
+
+if (lam == 0) {
+  y_trans <- log(bike_ts)
+} else if (lam > 0) {
+  y_trans <- (bike_ts^lam - 1) / lam
+} else { 
+  # negative lambda → use minus sign trick like in lectures
+  y_trans <- -(bike_ts^lam)
+}
+
+plot(y_trans, main = "Transformed Daily Trips", ylab = "Transformed trips")
+
+```
+Classical Decomposition 
+```{r}
+Decomp_bike <- stl(y_trans, s.window = "periodic")
+plot(Decomp_bike, main = "STL Decomposition of Transformed Daily Trips")
+
+# Extract components if needed
+bike_seasonal <- Decomp_bike$time.series[, "seasonal"]
+bike_trend    <- Decomp_bike$time.series[, "trend"]
+bike_remainder <- Decomp_bike$time.series[, "remainder"]
+
+```
+```{r}
+# --- Feature Engineering ---
+# Time Index
+tim <- time(bike_ts) 
+
+# Seasonal Factors
+month <- factor(format(bike$trip_date, "%m")) 
+weekday_num <- as.numeric(format(bike$trip_date, "%u")) # 1=Mon, ..., 7=Sun
+weekday <- factor(weekday_num)
+is_weekend <- factor(ifelse(weekday_num >= 6, "Weekend", "Weekday"))
+
+# Dataframe
+model_data <- data.frame(
+  y_trans = as.numeric(y_trans),
+  tim = as.numeric(tim),
+  month = month,
+  weekday = weekday,
+  is_weekend = is_weekend
+)
+```
+
+
+```{r}
+# --- Visualizing the Seasonality Tests ---
+
+# Model 0: Base (Trend + Month Only)
+mod_base <- lm(y_trans ~ tim + month, data = model_data)
+
+# PLOT 0: Base Model
+plot(model_data$tim, model_data$y_trans, type = "l", col = "gray",
+     main = "Model 0: Monthly Seasonality Only", ylab = "Transformed Trips", xlab = "Time")
+lines(model_data$tim, fitted(mod_base), col = "red", lwd = 1)
+legend("topleft", legend = c("Data", "Fit (Month only)"), col = c("gray", "red"), lty = 1, bty = "n")
+```
+
+```{r}
+# Model 1: Weekend (Trend + Month + Weekend Indicator)
+mod_weekend <- lm(y_trans ~ tim + month + is_weekend, data = model_data)
+
+# PLOT 1: Weekend Model
+plot(model_data$tim, model_data$y_trans, type = "l", col = "gray",
+     main = "Model 1: Month + Weekend Indicator", ylab = "Transformed Trips", xlab = "Time")
+lines(model_data$tim, fitted(mod_weekend), col = "blue", lwd = 1)
+legend("topleft", legend = c("Data", "Fit (Month + Weekend)"), col = c("gray", "blue"), lty = 1, bty = "n")
+```
+
+```{r}
+# Model 2: Full Weekday (Trend + Month + Full Weekday)
+mod_weekday <- lm(y_trans ~ tim + month + weekday, data = model_data)
+
+# PLOT 2: Weekday Model
+# We zoom in on a shorter window (e.g., first year) for this plot 
+# because the daily wiggle is hard to see on the full plot
+plot(model_data$tim, model_data$y_trans, type = "l", col = "gray",
+     main = "Model 2: Month + Full Weekday (First Year Zoom)", ylab = "Transformed Trips", xlab = "Time")
+lines(model_data$tim, fitted(mod_weekday), col = "darkgreen", lwd = 1)
+legend("topleft", legend = c("Data", "Fit (Month + Weekday)"), col = c("gray", "darkgreen"), lty = 1, bty = "n")
+```
+```{r}
+# --- Hypothesis Testing ---
+# Now you perform the tests to confirm what you see in the plots
+anova(mod_base, mod_weekend)
+anova(mod_weekend, mod_weekday)
+AIC(mod_base, mod_weekend, mod_weekday)
+```
+```{r}
+# --- Manual Time Series Cross-Validation ---
+
+# 1. Setup
+n_total <- length(bike_ts)
+min_train <- 365 * 2  # Start training after 2 years of data
+horizon <- 1          # One-step ahead forecast
+
+# We will test degrees 1 to 6
+degrees <- 1:6
+cv_mse <- numeric(length(degrees))
+
+# Time index and Monthly dummies for the WHOLE dataset first
+# (It's safe to create predictors beforehand as they are deterministic)
+time_idx <- 1:n_total
+month_fac <- factor(cycle(bike_ts)) # 1 to 12
+
+# Prepare the master dataframe
+data_full <- data.frame(y = as.numeric(bike_ts), t = time_idx, month = month_fac)
+
+# Loop through degrees
+for (deg in degrees) {
+  
+  errors <- c()
+  
+  # 2. Rolling Loop
+  # We slide the cutoff "i" from min_train to (n_total - 1)
+  # This might be slow if n is large. For 2000 points it's fine.
+  # To speed up, you can step by 30 days (monthly rolling) instead of 1 day.
+  
+  for (i in seq(min_train, n_total - 1, by = 30)) { # Jumping by 30 days for speed
+    
+    # Train set: 1 to i
+    train_set <- data_full[1:i, ]
+    
+    # Test set: i+1
+    test_set <- data_full[(i + 1), , drop = FALSE] # drop=FALSE keeps it a dataframe
+    
+    # Fit model on Train
+    # Note: raw=TRUE is critical here so the coefficients mean something stable
+    fit <- lm(y ~ poly(t, deg, raw = TRUE) + month, data = train_set)
+    
+    # Predict on Test
+    pred <- predict(fit, newdata = test_set)
+    
+    # Calculate Squared Error
+    err <- (test_set$y - pred)^2
+    errors <- c(errors, err)
+  }
+  
+  # Average MSE for this degree
+  cv_mse[deg] <- mean(errors)
+  print(paste("Degree", deg, "MSE:", round(cv_mse[deg], 4)))
+}
+
+# 3. Visualize Results
+results_ts_cv <- data.frame(Degree = degrees, MSE = cv_mse)
+
+plot(results_ts_cv$Degree, results_ts_cv$MSE, type = "b", col = "blue", pch = 19,
+     main = "Time Series Cross-Validation Error",
+     xlab = "Polynomial Degree", ylab = "Mean Squared Error")
+
+best_d <- which.min(cv_mse)
+points(best_d, cv_mse[best_d], col = "red", cex = 2, pch = 1)
+text(best_d, cv_mse[best_d], paste("Best:", best_d), pos = 3, col = "red")
+```
+
+
+```{r}
+# --- 1. Refit the Winner (Degree 2) on Full Data ---
+final_model <- lm(y_trans ~ poly(tim, 2, raw = FALSE) + month + weekday, data = model_data)
+summary(final_model)
+
+# --- 2. Diagnostic Plots (Generated One by One) ---
+
+# Plot A: Histogram of Residuals
+# Checks if the noise is roughly Bell-shaped
+hist(final_model$residuals, 
+     breaks = 30, 
+     col = "lightblue", 
+     main = "Histogram of Residuals", 
+     xlab = "Residuals")
+box() # Adds a nice border
+
+# Plot B: Q-Q Plot
+# Checks for Normality (points should hug the blue line)
+car::qqPlot(final_model$residuals, 
+            pch = 16, 
+            col = adjustcolor("black", 0.7),
+            main = "Normal Q-Q Plot",
+            xlab = "Theoretical Quantiles", 
+            ylab = "Sample Quantiles")
+
+# Plot C: Fitted Values vs. Residuals
+# Checks for Homoscedasticity (spread should be constant, no funnel shape)
+plot(fitted(final_model), residuals(final_model), 
+     pch = 16, 
+     col = adjustcolor("black", 0.4),
+     main = "Residuals vs. Fitted Values", 
+     xlab = "Fitted Values", 
+     ylab = "Residuals")
+abline(h = 0, lty = 2, col = "red", lwd = 2)
+
+# Plot D: Residuals vs. Time
+# Checks if variance changes over time or if there are bursts of volatility
+plot(residuals(final_model), 
+     pch = 16, 
+     col = adjustcolor("black", 0.4),
+     main = "Residuals vs. Time", 
+     xlab = "Time Index", 
+     ylab = "Residuals")
+abline(h = 0, lty = 2, col = "red", lwd = 2)
+
+# Plot E: ACF of Residuals
+# Checks for Independence (bars should stay inside blue lines)
+acf(residuals(final_model), 
+    lag.max = 365, # Check up to a year of lags to see long-term correlation
+    main = "ACF of Residuals")
+
+# --- 3. Statistical Tests ---
+print("--- Shapiro-Wilk Test for Normality ---")
+# Limit to 5000 samples because shapiro.test() has a hard limit
+if(length(residuals(final_model)) > 5000) {
+  print(shapiro.test(residuals(final_model)[1:5000]))
+} else {
+  print(shapiro.test(residuals(final_model)))
+}
+
+print("--- Kolmogorov-Smirnov Test for Normality ---")
+print(ks.test(scale(residuals(final_model)), "pnorm"))
+
+print("--- Runs Test for Randomness ---")
+# Checks if residuals have random sign flips
+print(randtests::runs.test(residuals(final_model)))
+```
+
+
