@@ -9,13 +9,6 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r}
-#library(lubridate)
-#data <- read.csv("trips_per_day.csv") 
-#data$month <- factor(month(data$trip_date), levels = 1:12,
- #                    labels = month.abb)
-#boxplot(n_trips ~ month, data = data)
-```
 
 ```{r}
 trip_data <- read.csv("trips_per_day.csv") 
