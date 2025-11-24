@@ -1,0 +1,27 @@
+---
+title: "Project Analysis"
+author: "Amisha Anand"
+date: "2025-11-20"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#library(lubridate)
+#data <- read.csv("trips_per_day.csv") 
+#data$month <- factor(month(data$trip_date), levels = 1:12,
+ #                    labels = month.abb)
+#boxplot(n_trips ~ month, data = data)
+```
+
+```{r}
+trip_data <- read.csv("trips_per_day.csv") 
+trip_data$trip_date <- as.Date(trip_data$trip_date)
+trip_data$n_month <- as.numeric(format(trip_data$trip_date, "%m"))
+trip_data$month <- factor(trip_data$n_month, levels = 1:12, labels = month.abb)
+boxplot(n_trips ~ month, data = trip_data)
+
+```
