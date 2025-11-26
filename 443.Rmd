@@ -28,4 +28,157 @@ summary_table <- trips %>%
 ```{r}
 summary_table
 ```
+# Check for Missing Data
+```{r}
+
+trips <- trips %>%
+  mutate(trip_date = as.Date(trip_date))
+```
+```{r}
+trips <- trips %>%
+  filter(!is.na(trip_date))
+```
+
+```{r}
+full_dates <- tibble(
+  trip_date = seq(min(trips$trip_date), max(trips$trip_date), by = "day")
+)
+```
+```{r}
+df_complete <- full_dates %>%
+  left_join(trips, by = "trip_date")
+```
+```{r}
+missing_dates <- df_complete %>%
+  filter(is.na(n_trips))
+
+missing_dates
+n_missing <- nrow(missing_dates)
+n_missing
+```
+```{r}
+library(ggplot2)
+
+ggplot(df_complete, aes(x = trip_date, y = is.na(n_trips))) +
+  geom_point(alpha = 0.6) +
+  scale_y_continuous(breaks = c(0,1), labels = c("Present", "Missing")) +
+  labs(title = "Missing Daily BikeShare Data", x = "Date", y = "")
+```
+To identify missing days, we created a complete calendar sequence from July 2016 to October 2024 and merged it with our aggregated dataset. We found 218 missing days, primarily concentrated in 2016-01-13 to 2017-06-12. Based on documentation and visual inspection, these days correspond to reporting gaps in TTC's system or during the aggregation of the files where different date formats caused missing dates.
+
+# Modelling
+```{r}
+# Sort just in case
+trips <- trips[order(trips$trip_date), ]
+
+train <- trips %>%
+  filter(trip_date <= as.Date("2023-12-31"))
+
+test <- trips %>%
+  filter(trip_date >= as.Date("2024-01-01"))
+
+# Daily frequency with weekly seasonality
+bike_ts <- ts(
+  train$n_trips,
+  start = c(as.numeric(format(min(trips$trip_date), "%Y")), 
+            as.numeric(format(min(trips$trip_date), "%j"))),
+  frequency = 7
+)
+```
+
+# Preparing the data
+```{r}
+library(tseries)
+library(MASS)
+
+y_raw <- train$n_trips
+
+bc <- boxcox(y_raw ~ 1, lambda = seq(-2,2,by=0.1))
+(lambda_opt_mod <- bc$x[which.max(bc$y)])
+
+lam <- lambda_opt_mod   # keep this for later
+
+if (lam == 0) {
+  y_trans <- log(bike_ts)
+} else if (lam > 0) {
+  y_trans <- (bike_ts^lam - 1) / lam
+} else { 
+  # negative lambda → use minus sign trick like in lectures
+  y_trans <- -(bike_ts^lam)
+}
+```
+
+```{r}
+# Convert to time series
+y_ts <- ts(y_trans,frequency=7)
+```
+
+```{r}
+library(forecast)
+library(ggplot2)
+autoplot(y_ts) +
+  ggtitle("Daily BikeShare Ridership (log scale)") +
+  ylab("log(trips)")
+```
+```{r}
+adf.test(y_ts)
+```
+```{r}
+Acf(y_ts, lag.max=60, main = "ACF: differenced")
+Pacf(y_ts,lag.max=60, main = "PACF: differenced")
+
+```
+```{r}
+library(forecast)
+
+# y is your log-transformed series, e.g. log(n_trips + 1)
+y1 <- diff(y_ts, lag = 1)
+
+autoplot(y1) + ggtitle("First Difference: removes trend")
+Acf(y1, lag.max = 100)
+Pacf(y1, lag.max = 100)
+```
+We see weekly seasonality, so we will difference seasonally.
+```{r}
+y2 <- diff(y1, lag = 7)   # (1,1,7) differencing: trend + weekly
+
+autoplot(y2) + ggtitle("After Nonseasonal + Weekly Seasonal Differencing")
+Acf(y2, lag.max = 60)
+Pacf(y2, lag.max = 60)
+```
+The daily BikeShare series exhibits both weekly and annual seasonality. Since classical SARIMA models can only incorporate one seasonal period, we chose to model the weekly cycle (s = 7) in the Box–Jenkins framework, because day-of-week effects dominate short-term correlation. The longer annual cycle is more smoothly varying and is handled in our regression models rather than directly in the SARIMA structure.
+
+After applying both non-seasonal differencing (d = 1) and weekly seasonal differencing (D = 1), the PACF did not show a dominant spike at lag 1 or 2, nor a sharp cutoff pattern. Instead, the short-lag PACF values were small (−0.3 to −0.1) and damped gradually, which is characteristic of MA-type dependence rather than AR-type dependence. Similarly, the PACF at the seasonal lag (7) did not show a strong and isolated seasonal spike, indicating that no seasonal AR term was required. In contrast, the ACF displayed a strong negative spike at lag 1 and at lag 7, which is consistent with a non-seasonal MA(1) and a seasonal MA(1) component. Therefore, the AR components were set to zero (p = P = 0), and we focused on MA-driven SARIMA models. This led us to propose SARIMA(0,1,1)(0,1,1)_7 as 1 of the candidate models.
+
+# Fit SARIMA
+```{r}
+library(forecast)
+fit_011_011 <- Arima(
+  y_ts,
+  order = c(0,1,1),
+  seasonal = c(0,1,1),
+  include.constant = FALSE
+)
+```
+```{r}
+summary(fit_011_011)
+AIC(fit_011_011) ; BIC(fit_011_011)
+```
+```{r}
+# This gives: residual ts plot, ACF, and Ljung–Box p-value
+checkresiduals(fit_011_011)
+
+# If you want explicit Ljung–Box:
+Box.test(
+  residuals(fit_011_011),
+  lag   = 21,         # or 28 if you want a few weekly cycles
+  type  = "Ljung-Box",
+  fitdf = length(coef(fit_011_011))         # q + Q = 1 + 1
+)
+qqnorm(residuals(fit_011_011));qqline(residuals(fit_011_011),col=2)
+```
+
+
+
+
 
