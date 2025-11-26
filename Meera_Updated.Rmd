@@ -339,67 +339,114 @@ print(vif_values[high_vif, ])
 
 
 ```{r}
-# --- Regularized Regression Analysis (Lasso) ---
 library(glmnet)
 
-# 1. Prepare Data Matrices (glmnet requires matrix input, not formula)
-# We use the same Training (2017-2022) and Validation (2023) split
-# Model Structure: Trend + Month + DayOfWeek + Fourier (Kitchen Sink)
+# 1. Build the EXACT same design matrix as the OLS model
+X_train <- model.matrix(
+  y_trans ~ poly(time_index, 1, raw = TRUE) + month_fac + weekday_fac + sin_year,
+  data = train_full
+)[, -1]   # remove intercept (glmnet adds its own)
 
-# Create model matrix for Training Data
-# -1 removes the intercept column (glmnet handles intercept automatically)
-x_train_lasso <- model.matrix(y_trans ~ time_index + month_fac + weekday_fac + sin_year, 
-                              data = train_seas)[, -1]
-y_train_lasso <- train_seas$y_trans
+Y_train <- train_full$y_trans
 
-# Create model matrix for Validation Data
-x_valid_lasso <- model.matrix(y_trans ~ time_index + month_fac + weekday_fac + sin_year, 
-                              data = valid_seas)[, -1]
-y_valid_lasso <- valid_seas$y_trans
-
-# 2. Cross-Validation to find Optimal Lambda
-set.seed(443) # For reproducibility
-cv_lasso <- cv.glmnet(x_train_lasso, y_train_lasso, alpha = 1) # alpha=1 is Lasso
-
-# Plot CV results
-plot(cv_lasso)
-best_lambda <- cv_lasso$lambda.min
-print(paste("Optimal Lambda for Lasso:", best_lambda))
-
-# 3. Fit Final Lasso Model
-lasso_model <- glmnet(x_train_lasso, y_train_lasso, alpha = 1, lambda = best_lambda)
-
-# 4. Inspect Coefficients
-# This shows which variables Lasso kept vs. shrunk to zero
-print("Lasso Coefficients:")
-print(coef(lasso_model))
-
-# 5. Compare Performance on Validation Set
-# OLS Prediction (Using your mod5 from Step 6)
-pred_ols <- predict(mod5, newdata = valid_seas)
-rmse_ols <- sqrt(mean((y_valid_lasso - pred_ols)^2))
-
-# Lasso Prediction
-pred_lasso <- predict(lasso_model, newx = x_valid_lasso)
-rmse_lasso <- sqrt(mean((y_valid_lasso - pred_lasso)^2))
-
-# Results Comparison
-comparison_table <- data.frame(
-  Method = c("OLS Regression", "Lasso Regression"),
-  RMSE_Validation = c(rmse_ols, rmse_lasso)
+# 2. Fit CV-Lasso on the exact same feature matrix
+set.seed(443)
+cv_lasso <- cv.glmnet(
+  X_train,
+  Y_train,
+  alpha = 1,
+  standardize = TRUE,
+  intercept = TRUE,
+  family = "gaussian"
 )
-print(comparison_table)
 
-# Visual Comparison on Validation Set (Zoomed in)
-par(mfrow=c(1,1))
-plot(valid_seas$trip_date, y_valid_lasso, type="l", col="gray", lwd=2,
-     main="OLS vs Lasso on Validation Set (2023)", ylab="Transformed Trips", xlab="Date")
-lines(valid_seas$trip_date, pred_ols, col="blue", lwd=1)
-lines(valid_seas$trip_date, pred_lasso, col="red", lty=2, lwd=1) # Dashed line for Lasso
-legend("bottomright", legend=c("Actual", "OLS", "Lasso"), 
-       col=c("gray", "blue", "red"), lty=c(1, 1, 2))
+best_lambda <- cv_lasso$lambda.min
+best_lambda
+
+lasso_model <- glmnet(
+  X_train, Y_train,
+  alpha = 1,
+  lambda = best_lambda,
+  standardize = TRUE,
+  intercept = TRUE,
+  family = "gaussian"
+)
+
+coef(lasso_model)
 ```
 We applied Lasso regression to test for feature redundancy. The optimal lambda was small (0.0045), and Lasso retained nearly all predictors, confirming their relevance. The validation RMSE for Lasso (3.904) was virtually identical to the OLS model (3.903). Since regularization yielded no performance gain or significant simplification, we proceeded with the standard OLS regression model for the final forecasting phase.
+
+```{r}
+# --- Consistent AIC/BIC for OLS vs Lasso using Gaussian likelihood ---
+
+# Unified AIC / BIC functions -------------------------------------------
+
+calc_AIC <- function(rss, n, k) {
+  sigma2 <- rss / n
+  loglik <- -n/2 * (log(2*pi*sigma2) + 1)
+  AIC <- -2*loglik + 2*k
+  return(AIC)
+}
+
+calc_BIC <- function(rss, n, k) {
+  sigma2 <- rss / n
+  loglik <- -n/2 * (log(2*pi*sigma2) + 1)
+  BIC <- -2*loglik + log(n)*k
+  return(BIC)
+}
+
+calc_AICc <- function(aic, n, k) {
+  aic + (2*k*(k+1)) / (n - k - 1)
+}
+
+# -----------------------------------------------------------------------
+# 1. OLS model (final_reg)
+# -----------------------------------------------------------------------
+
+rss_ols <- sum(residuals(final_reg)^2)
+n_ols <- nobs(final_reg)
+k_ols <- length(coef(final_reg))
+
+AIC_ols  <- calc_AIC(rss_ols, n_ols, k_ols)
+BIC_ols  <- calc_BIC(rss_ols, n_ols, k_ols)
+AICc_ols <- calc_AICc(AIC_ols, n_ols, k_ols)
+adjR2_ols <- summary(final_reg)$adj.r.squared
+
+# -----------------------------------------------------------------------
+# 2. Lasso model
+# -----------------------------------------------------------------------
+
+# training predictions
+lasso_pred_train <- predict(lasso_model, newx = X_train)
+
+rss_lasso <- sum((Y_train - lasso_pred_train)^2)
+n_lasso <- length(Y_train)
+k_lasso <- sum(coef(lasso_model) != 0)  # df = non-zero coefficients
+
+AIC_lasso  <- calc_AIC(rss_lasso, n_lasso, k_lasso)
+BIC_lasso  <- calc_BIC(rss_lasso, n_lasso, k_lasso)
+AICc_lasso <- calc_AICc(AIC_lasso, n_lasso, k_lasso)
+
+# Adjusted R2
+tss <- sum((Y_train - mean(Y_train))^2)
+adjR2_lasso <- 1 - ((rss_lasso/(n_lasso - k_lasso - 1)) /
+                    (tss/(n_lasso - 1)))
+
+# -----------------------------------------------------------------------
+# 3. Final comparison table
+# -----------------------------------------------------------------------
+
+comparison <- data.frame(
+  Model = c("OLS", "Lasso"),
+  AIC = c(AIC_ols, AIC_lasso),
+  AICc = c(AICc_ols, AICc_lasso),
+  BIC = c(BIC_ols, BIC_lasso),
+  Adjusted_R2 = c(adjR2_ols, adjR2_lasso)
+)
+
+comparison
+
+```
 
 
 
@@ -492,4 +539,29 @@ RegressionDiagnosicsPlots(final_reg)
 RegressionDiagnosicsTests(final_reg)
 ```
 Diagnostic tests confirm that while the regression model explains a large portion of the variance, the residuals significantly violate assumptions of normality, constant variance, and independence. This lack of independence specifically motivates the use of ARIMA modeling in the next phase to capture the remaining autocorrelation structure.
+
+
+```{r}
+# Residual Diagnostics for Lasso 
+
+# Fitted values for training data
+fitted_lasso <- predict(lasso_model, newx = X_train)
+
+# Residuals
+resid_lasso <- Y_train - fitted_lasso
+
+plot(fitted_lasso, resid_lasso,
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Lasso: Residuals vs Fitted")
+abline(h = 0, col = "red")
+
+qqnorm(resid_lasso)
+qqline(resid_lasso, col = "red")
+
+hist(resid_lasso, breaks = 30)
+
+plot(train_full$trip_date, resid_lasso, type="l")
+acf(resid_lasso)
+
+```
 
