@@ -184,7 +184,7 @@ ggplot(plot_long, aes(x = trip_date, y = Value, color = Series)) +
   geom_vline(xintercept = as.Date("2023-01-01"), linetype = "dashed", color = "black") +
   labs(title = "Model Fits vs. Actual Data (2017-2024)",
        subtitle = "Models trained on data before 2023 (left of dashed line)",
-       y = "Log(Trips)", x = "Date") +
+       y = "Transformed Trips", x = "Date") +
   theme_minimal() +
   scale_color_manual(values = c("y_trans" = "gray", 
                                 "Pred_Mod1" = "orange", 
@@ -201,7 +201,7 @@ plot_one_model <- function(pred_col, model_name) {
     geom_line(aes(y = y_trans), color = "gray", alpha = 0.5) +
     geom_line(aes(y = .data[[pred_col]]), color = "blue") +
     geom_vline(xintercept = as.Date("2023-01-01"), linetype = "dashed") +
-    labs(title = paste("Fit:", model_name), y = "Log(Trips)", x = "Date") +
+    labs(title = paste("Fit:", model_name), y = "Transformed Trips", x = "Date") +
     theme_minimal()
 }
 ```
@@ -348,7 +348,7 @@ print(comparison_table)
 # Visual Comparison on Validation Set (Zoomed in)
 par(mfrow=c(1,1))
 plot(valid_seas$trip_date, y_valid_lasso, type="l", col="gray", lwd=2,
-     main="OLS vs Lasso on Validation Set (2023)", ylab="Log(Trips)", xlab="Date")
+     main="OLS vs Lasso on Validation Set (2023)", ylab="Transformed Trips", xlab="Date")
 lines(valid_seas$trip_date, pred_ols, col="blue", lwd=1)
 lines(valid_seas$trip_date, pred_lasso, col="red", lty=2, lwd=1) # Dashed line for Lasso
 legend("bottomright", legend=c("Actual", "OLS", "Lasso"), 
