@@ -491,5 +491,5 @@ RegressionDiagnosicsPlots(final_reg)
 # Generate Formal Tests
 RegressionDiagnosicsTests(final_reg)
 ```
-Diagnostic tests confirm that while the regression model explains a large portion of the variance (Adjusted R2=0.80), the residuals significantly violate assumptions of normality, constant variance, and independence. This lack of independence specifically motivates the use of ARIMA modeling in the next phase to capture the remaining autocorrelation structure.
+Diagnostic tests confirm that while the regression model explains a large portion of the variance, the residuals significantly violate assumptions of normality, constant variance, and independence. This lack of independence specifically motivates the use of ARIMA modeling in the next phase to capture the remaining autocorrelation structure.
 
