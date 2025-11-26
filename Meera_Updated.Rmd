@@ -562,3 +562,52 @@ acf(resid_lasso)
 
 ```
 
+```{r}
+# --- Step 8: Final Model Selection and Forecasting ---
+
+# 1. Justification for OLS over LASSO
+cat("Model Selection Justification:\n")
+cat("We selected the OLS regression model over the Lasso model for the final forecasting.\n")
+cat("1. Performance: The Lasso model did not provide a significant improvement in APSE on the validation set compared to OLS, suggesting that overfitting was not a major issue.\n")
+cat("2. Parsimony: The Lasso model retained nearly all predictors (shrinkage was minimal), confirming that the variables selected in our OLS model (Trend, Seasonality, Fourier terms) are all relevant.\n")
+cat("3. Interpretability: The OLS model provides standard confidence intervals and p-values, which are valuable for inference.\n\n")
+
+# 2. Prepare Test Data (2024) for Forecasting
+# We must process the test data exactly like the training data
+test_data <- subset(bike, trip_date >= "2024-01-01")
+
+# Important: Generate polynomial trend for test data using the TRAINING basis
+# (This ensures the trend continuation is mathematically consistent)
+poly_test <- predict(poly_basis_final, test_data$time_index)
+
+# Build the test dataframe matching the structure of 'final_train_data'
+final_test_data <- data.frame(
+  y = test_data$y_trans,
+  poly = poly_test,
+  month = test_data$month_fac,
+  weekday = test_data$weekday_fac,
+  sin_year = test_data$sin_year
+)
+
+# Ensure column names match exactly (handling R's auto-naming of poly columns)
+names(final_test_data) <- names(final_train_data)
+
+# 3. Forecast Future Values (2024)
+# Generate point predictions
+preds_2024 <- predict(final_reg, newdata = final_test_data)
+
+# 4. Calculate Prediction Accuracy (APSE)
+# APSE = Average Prediction Squared Error
+apse_test <- mean((final_test_data$y - preds_2024)^2)
+
+# Output the results
+print(paste("Final Forecast Accuracy on 2024 Test Data (APSE):", round(apse_test, 4)))
+
+# Optional: Visualize the Forecast
+plot(test_data$trip_date, final_test_data$y, type = "l", col = "gray", lwd = 2,
+     main = "2024 Forecast vs Actuals (OLS)", ylab = "Transformed Trips", xlab = "Date")
+lines(test_data$trip_date, preds_2024, col = "red", lwd = 2)
+legend("topright", legend = c("Actual 2024 Data", "OLS Forecast"), 
+       col = c("gray", "red"), lty = 1, lwd = 2)
+```
+
