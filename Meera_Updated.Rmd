@@ -453,9 +453,6 @@ comparison
 
 Step 7: Residual Diagnostics on the Selected Model
 
-
-
-
 ```{r}
 # --- 1. Define Class Diagnostic Functions ---
 
