@@ -80,13 +80,12 @@ bike <- bike %>%
     
     # 2. Factor-based Seasonality
     month_fac = as.factor(month(trip_date)),
-    weekday_fac = as.factor(wday(trip_date, label=TRUE)),
+    weekday_fac = factor(wday(trip_date, label = TRUE), ordered = FALSE),
     is_weekend = as.factor(ifelse(wday(trip_date) %in% c(1, 7), "Yes", "No")),
     
     # 3. Fourier Terms for Smooth Annual Seasonality
     # Using period = 365.25 to account for leap years over the long dataset
-    sin_year = sin(2 * pi * time_index / 360),
-    cos_year = cos(2 * pi * time_index / 360)
+    sin_year = sin((2 * pi * time_index / 360) + 0.75),
   )
 
 # Train on 2017-2022, Validate on 2023
@@ -100,19 +99,19 @@ Step 6: Trying out different models
 # --- Model Fitting ---
 
 # 1. Trend + Fourier Only
-mod1 <- lm(y_trans ~ time_index + sin_year + cos_year, data = train_seas)
+mod1 <- lm(y_trans ~ time_index + sin_year , data = train_seas)
 
 # 2. Trend + Fourier + Month + Day of Week
-mod2 <- lm(y_trans ~ time_index + sin_year + cos_year + weekday_fac, data = train_seas)
+mod2 <- lm(y_trans ~ time_index + sin_year + weekday_fac, data = train_seas)
 
 # 3. Trend + Fourier + Month
-mod3 <- lm(y_trans ~ time_index + sin_year + cos_year + month_fac, data = train_seas)
+mod3 <- lm(y_trans ~ time_index + sin_year  + month_fac, data = train_seas)
 
 # 4. Trend + Fourier + Month + Weekend/Weekday
-mod4 <- lm(y_trans ~ time_index + sin_year + cos_year + month_fac + is_weekend, data = train_seas)
+mod4 <- lm(y_trans ~ time_index + sin_year  + month_fac + is_weekend, data = train_seas)
 
 # 5. Trend + Fourier + Month + Day of Week
-mod5 <- lm(y_trans ~ time_index + sin_year + cos_year + month_fac + weekday_fac, data = train_seas)
+mod5 <- lm(y_trans ~ time_index + sin_year  + month_fac + weekday_fac, data = train_seas)
 
 
 # --- Model Evaluation ---
@@ -160,7 +159,7 @@ print(results)
 # Create a dataframe with all data for plotting
 # We use the 'bike' dataframe which contains everything (Train + Valid + Test)
 plot_data <- bike %>%
-  dplyr::select(trip_date, y_trans, time_index, month_fac, weekday_fac, is_weekend, sin_year, cos_year)
+  dplyr::select(trip_date, y_trans, time_index, month_fac, weekday_fac, is_weekend, sin_year)
 
 # Generate predictions for the entire timeline for each model
 # Note: We are predicting using the models trained ONLY on 2017-2022 data
@@ -258,17 +257,13 @@ for (p in 1:max_degree) {
       poly = poly_basis[train_idx, , drop=FALSE],
       month = cv_data$month_fac[train_idx],
       weekday = cv_data$weekday_fac[train_idx],
-      sin_year = cv_data$sin_year[train_idx],
-      cos_year = cv_data$cos_year[train_idx]
-    )
+      sin_year = cv_data$sin_year[train_idx]    )
                           
     x_test <- data.frame(
       poly = poly_basis[test_idx, , drop=FALSE],
       month = cv_data$month_fac[test_idx],
       weekday = cv_data$weekday_fac[test_idx],
-      sin_year = cv_data$sin_year[test_idx],
-      cos_year = cv_data$cos_year[test_idx]
-    )
+      sin_year = cv_data$sin_year[test_idx]    )
     
     # Fit Model
     # y ~ . uses all columns in x_train as predictors
@@ -294,7 +289,72 @@ text(best_p, results_poly$APSE[best_p], paste("Best:", best_p), pos = 3, col = "
 
 print(paste("Best Polynomial Degree:", best_p))
 ```
-As anticipated, the best model is a linear polynomial.
+As anticipated, the best model is a linear polynomial. We theorize that there might be some multicollinearity and use VIF to check:
+
+
+
+```{r}
+# --- Regularized Regression Analysis (Lasso) ---
+library(glmnet)
+
+# 1. Prepare Data Matrices (glmnet requires matrix input, not formula)
+# We use the same Training (2017-2022) and Validation (2023) split
+# Model Structure: Trend + Month + DayOfWeek + Fourier (Kitchen Sink)
+
+# Create model matrix for Training Data
+# -1 removes the intercept column (glmnet handles intercept automatically)
+x_train_lasso <- model.matrix(y_trans ~ time_index + month_fac + weekday_fac + sin_year, 
+                              data = train_seas)[, -1]
+y_train_lasso <- train_seas$y_trans
+
+# Create model matrix for Validation Data
+x_valid_lasso <- model.matrix(y_trans ~ time_index + month_fac + weekday_fac + sin_year, 
+                              data = valid_seas)[, -1]
+y_valid_lasso <- valid_seas$y_trans
+
+# 2. Cross-Validation to find Optimal Lambda
+set.seed(443) # For reproducibility
+cv_lasso <- cv.glmnet(x_train_lasso, y_train_lasso, alpha = 1) # alpha=1 is Lasso
+
+# Plot CV results
+plot(cv_lasso)
+best_lambda <- cv_lasso$lambda.min
+print(paste("Optimal Lambda for Lasso:", best_lambda))
+
+# 3. Fit Final Lasso Model
+lasso_model <- glmnet(x_train_lasso, y_train_lasso, alpha = 1, lambda = best_lambda)
+
+# 4. Inspect Coefficients
+# This shows which variables Lasso kept vs. shrunk to zero
+print("Lasso Coefficients:")
+print(coef(lasso_model))
+
+# 5. Compare Performance on Validation Set
+# OLS Prediction (Using your mod5 from Step 6)
+pred_ols <- predict(mod5, newdata = valid_seas)
+rmse_ols <- sqrt(mean((y_valid_lasso - pred_ols)^2))
+
+# Lasso Prediction
+pred_lasso <- predict(lasso_model, newx = x_valid_lasso)
+rmse_lasso <- sqrt(mean((y_valid_lasso - pred_lasso)^2))
+
+# Results Comparison
+comparison_table <- data.frame(
+  Method = c("OLS Regression", "Lasso Regression"),
+  RMSE_Validation = c(rmse_ols, rmse_lasso)
+)
+print(comparison_table)
+
+# Visual Comparison on Validation Set (Zoomed in)
+par(mfrow=c(1,1))
+plot(valid_seas$trip_date, y_valid_lasso, type="l", col="gray", lwd=2,
+     main="OLS vs Lasso on Validation Set (2023)", ylab="Log(Trips)", xlab="Date")
+lines(valid_seas$trip_date, pred_ols, col="blue", lwd=1)
+lines(valid_seas$trip_date, pred_lasso, col="red", lty=2, lwd=1) # Dashed line for Lasso
+legend("bottomright", legend=c("Actual", "OLS", "Lasso"), 
+       col=c("gray", "blue", "red"), lty=c(1, 1, 2))
+```
+We applied Lasso regression to test for feature redundancy. The optimal lambda was small (0.0045), and Lasso retained nearly all predictors, confirming their relevance. The validation RMSE for Lasso (3.904) was virtually identical to the OLS model (3.903). Since regularization yielded no performance gain or significant simplification, we proceeded with the standard OLS regression model for the final forecasting phase.
 
 Step 7: Residual Diagnostics on the Selected Model
 
@@ -316,8 +376,7 @@ final_train_data <- data.frame(
   poly = poly_basis_final,
   month = train_full$month_fac,
   weekday = train_full$weekday_fac,
-  sin_year = train_full$sin_year,
-  cos_year = train_full$cos_year
+  sin_year = train_full$sin_year
 )
 
 # 4. Fit the model
@@ -326,6 +385,23 @@ final_reg <- lm(y ~ ., data = final_train_data)
 
 # Check summary to confirm it worked
 summary(final_reg)
+```
+
+```{r}
+# --- Multicollinearity Check (VIF) ---
+library(car)
+
+# Calculate VIF for the final regression model
+# Note: We use generalized VIF (GVIF) because 'month' and 'weekday' are categorical factors
+vif_values <- vif(final_reg)
+
+print(vif_values)
+
+# Check for high multicollinearity
+# Rule of thumb: GVIF^(1/(2*Df)) > 2 indicates concerning collinearity (equivalent to VIF > 4)
+high_vif <- vif_values[,"GVIF^(1/(2*Df))"] > 2
+print("Variables with potentially problematic collinearity:")
+print(vif_values[high_vif, ])
 ```
 
 
