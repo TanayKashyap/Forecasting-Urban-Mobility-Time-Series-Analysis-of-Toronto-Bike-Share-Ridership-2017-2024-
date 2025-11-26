@@ -315,6 +315,7 @@ final_train_data <- data.frame(
 # 4. Fit the model
 # This creates the 'final_reg' object the next chunk is looking for
 final_reg <- lm(y ~ ., data = final_train_data)
+saveRDS(final_reg, "final_reg.rds")
 
 # Check summary to confirm it worked
 summary(final_reg)
