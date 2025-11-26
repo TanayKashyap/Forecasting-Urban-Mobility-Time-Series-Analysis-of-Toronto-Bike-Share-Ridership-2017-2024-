@@ -291,6 +291,51 @@ print(paste("Best Polynomial Degree:", best_p))
 ```
 As anticipated, the best model is a linear polynomial. We theorize that there might be some multicollinearity and use VIF to check:
 
+```{r}
+# --- Fit Final Regression Model (REQUIRED before Diagnostics) ---
+
+# 1. Define the Training Data (2017-2023)
+# We exclude the 2024 data (Test Set) to keep it unseen
+train_full <- subset(bike, trip_date < "2024-01-01")
+
+# 2. Create the polynomial basis for the trend
+# We use Degree = 1 because your Cross-Validation identified it as the best.
+poly_basis_final <- poly(train_full$time_index, 1, raw = TRUE)
+
+# 3. Build the dataframe for lm
+# We combine the trend with the seasonal components (Month + Weekday + Fourier)
+final_train_data <- data.frame(
+  y = train_full$y_trans,
+  poly = poly_basis_final,
+  month = train_full$month_fac,
+  weekday = train_full$weekday_fac,
+  sin_year = train_full$sin_year
+)
+
+# 4. Fit the model
+# This creates the 'final_reg' object the next chunk is looking for
+final_reg <- lm(y ~ ., data = final_train_data)
+
+# Check summary to confirm it worked
+summary(final_reg)
+```
+
+```{r}
+# --- Multicollinearity Check (VIF) ---
+library(car)
+
+# Calculate VIF for the final regression model
+# Note: We use generalized VIF (GVIF) because 'month' and 'weekday' are categorical factors
+vif_values <- vif(final_reg)
+
+print(vif_values)
+
+# Check for high multicollinearity
+# Rule of thumb: GVIF^(1/(2*Df)) > 2 indicates concerning collinearity (equivalent to VIF > 4)
+high_vif <- vif_values[,"GVIF^(1/(2*Df))"] > 2
+print("Variables with potentially problematic collinearity:")
+print(vif_values[high_vif, ])
+```
 
 
 ```{r}
@@ -356,53 +401,11 @@ legend("bottomright", legend=c("Actual", "OLS", "Lasso"),
 ```
 We applied Lasso regression to test for feature redundancy. The optimal lambda was small (0.0045), and Lasso retained nearly all predictors, confirming their relevance. The validation RMSE for Lasso (3.904) was virtually identical to the OLS model (3.903). Since regularization yielded no performance gain or significant simplification, we proceeded with the standard OLS regression model for the final forecasting phase.
 
+
+
 Step 7: Residual Diagnostics on the Selected Model
 
-```{r}
-# --- Fit Final Regression Model (REQUIRED before Diagnostics) ---
 
-# 1. Define the Training Data (2017-2023)
-# We exclude the 2024 data (Test Set) to keep it unseen
-train_full <- subset(bike, trip_date < "2024-01-01")
-
-# 2. Create the polynomial basis for the trend
-# We use Degree = 1 because your Cross-Validation identified it as the best.
-poly_basis_final <- poly(train_full$time_index, 1, raw = TRUE)
-
-# 3. Build the dataframe for lm
-# We combine the trend with the seasonal components (Month + Weekday + Fourier)
-final_train_data <- data.frame(
-  y = train_full$y_trans,
-  poly = poly_basis_final,
-  month = train_full$month_fac,
-  weekday = train_full$weekday_fac,
-  sin_year = train_full$sin_year
-)
-
-# 4. Fit the model
-# This creates the 'final_reg' object the next chunk is looking for
-final_reg <- lm(y ~ ., data = final_train_data)
-
-# Check summary to confirm it worked
-summary(final_reg)
-```
-
-```{r}
-# --- Multicollinearity Check (VIF) ---
-library(car)
-
-# Calculate VIF for the final regression model
-# Note: We use generalized VIF (GVIF) because 'month' and 'weekday' are categorical factors
-vif_values <- vif(final_reg)
-
-print(vif_values)
-
-# Check for high multicollinearity
-# Rule of thumb: GVIF^(1/(2*Df)) > 2 indicates concerning collinearity (equivalent to VIF > 4)
-high_vif <- vif_values[,"GVIF^(1/(2*Df))"] > 2
-print("Variables with potentially problematic collinearity:")
-print(vif_values[high_vif, ])
-```
 
 
 ```{r}
