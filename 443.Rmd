@@ -65,6 +65,12 @@ ggplot(df_complete, aes(x = trip_date, y = is.na(n_trips))) +
   labs(title = "Missing Daily BikeShare Data", x = "Date", y = "")
 ```
 To identify missing days, we created a complete calendar sequence from July 2016 to October 2024 and merged it with our aggregated dataset. We found 218 missing days, primarily concentrated in 2016-01-13 to 2017-06-12. Based on documentation and visual inspection, these days correspond to reporting gaps in TTC's system or during the aggregation of the files where different date formats caused missing dates.
+```{r}
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(dplyr)
+```
 
 # Modelling
 ```{r}
@@ -77,107 +83,241 @@ train <- trips %>%
 test <- trips %>%
   filter(trip_date >= as.Date("2024-01-01"))
 
-# Daily frequency with weekly seasonality
-bike_ts <- ts(
-  train$n_trips,
-  start = c(as.numeric(format(min(trips$trip_date), "%Y")), 
-            as.numeric(format(min(trips$trip_date), "%j"))),
-  frequency = 7
-)
+y_train <- ts(train$n_trips, frequency = 7)
+y_test  <- test$n_trips
 ```
 
 # Preparing the data
 ```{r}
-library(tseries)
-library(MASS)
-
-y_raw <- train$n_trips
-
-bc <- boxcox(y_raw ~ 1, lambda = seq(-2,2,by=0.1))
-(lambda_opt_mod <- bc$x[which.max(bc$y)])
-
-lam <- lambda_opt_mod   # keep this for later
-
-if (lam == 0) {
-  y_trans <- log(bike_ts)
-} else if (lam > 0) {
-  y_trans <- (bike_ts^lam - 1) / lam
-} else { 
-  # negative lambda → use minus sign trick like in lectures
-  y_trans <- -(bike_ts^lam)
-}
-```
-
-```{r}
-# Convert to time series
-y_ts <- ts(y_trans,frequency=7)
-```
-
-```{r}
-library(forecast)
-library(ggplot2)
-autoplot(y_ts) +
-  ggtitle("Daily BikeShare Ridership (log scale)") +
-  ylab("log(trips)")
+lambda <- BoxCox.lambda(y_train)
+lambda
 ```
 ```{r}
-adf.test(y_ts)
-```
-```{r}
-Acf(y_ts, lag.max=60, main = "ACF: differenced")
-Pacf(y_ts,lag.max=60, main = "PACF: differenced")
-
-```
-```{r}
-library(forecast)
-
-# y is your log-transformed series, e.g. log(n_trips + 1)
-y1 <- diff(y_ts, lag = 1)
-
-autoplot(y1) + ggtitle("First Difference: removes trend")
-Acf(y1, lag.max = 100)
-Pacf(y1, lag.max = 100)
-```
-We see weekly seasonality, so we will difference seasonally.
-```{r}
-y2 <- diff(y1, lag = 7)   # (1,1,7) differencing: trend + weekly
-
-autoplot(y2) + ggtitle("After Nonseasonal + Weekly Seasonal Differencing")
-Acf(y2, lag.max = 60)
-Pacf(y2, lag.max = 60)
+y_train_bc <- BoxCox(y_train, lambda = lambda)
+autoplot(y_train_bc) + ggtitle("Box-Cox Transformed Training Data")
 ```
 The daily BikeShare series exhibits both weekly and annual seasonality. Since classical SARIMA models can only incorporate one seasonal period, we chose to model the weekly cycle (s = 7) in the Box–Jenkins framework, because day-of-week effects dominate short-term correlation. The longer annual cycle is more smoothly varying and is handled in our regression models rather than directly in the SARIMA structure.
 
-After applying both non-seasonal differencing (d = 1) and weekly seasonal differencing (D = 1), the PACF did not show a dominant spike at lag 1 or 2, nor a sharp cutoff pattern. Instead, the short-lag PACF values were small (−0.3 to −0.1) and damped gradually, which is characteristic of MA-type dependence rather than AR-type dependence. Similarly, the PACF at the seasonal lag (7) did not show a strong and isolated seasonal spike, indicating that no seasonal AR term was required. In contrast, the ACF displayed a strong negative spike at lag 1 and at lag 7, which is consistent with a non-seasonal MA(1) and a seasonal MA(1) component. Therefore, the AR components were set to zero (p = P = 0), and we focused on MA-driven SARIMA models. This led us to propose SARIMA(0,1,1)(0,1,1)_7 as 1 of the candidate models.
-
-# Fit SARIMA
 ```{r}
+ndiffs(y_train_bc)    # suggested d
+nsdiffs(y_train_bc)   # suggested D, with period 7
+```
+The algorithm does not think a seasonal difference at lag 7 is needed.
+```{r}
+d <- ndiffs(y_train_bc)
+
+y_diff <- diff(y_train_bc,differences = d)
+autoplot(y_diff) + ggtitle("Differenced (d) Series")
+```
+```{r}
+ggtsdisplay(y_diff, main = "ACF & PACF After Differencing")
+```
+The weak repeating ACF at intervals of 7 supports a seasonal MA structure while the slowly decaying short-lag PACF means a pure ARIMA(p,1,q) with a small p/q is not fully resolving short-term dependence.
+So we can conclude non-seasonal differencing alone leaves seasonal autocorrelation.
+```{r}
+y_diff2 <- diff(diff(y_train_bc, differences = 1), lag = 7, differences = 1)
+
+ggtsdisplay(y_diff2, main = "ACF/PACF — With Seasonal Differencing (Lag 7)")
+```
+This pattern we see in the ACF and PACF is textbook SARIMA with seasonal MA(1) because their is a strong negative spike at the seasonal lag of 7 for MA(1) but no sharp seasonal cutoff, so we can exclude seasonal AR.
+
+So the seasonal order should be (0,1,1)_7 and since the ACF and PACF both show nagative MA-like behaviour at lags 1-2, our candidate q can be q = 1 or 2 and p will probably be small like 0 or 1.
+So we can try:
+- ARIMA(0,1,1)
+- ARIMA(1,1,1)
+- ARIMA(0,1,2)
+with a seasonal MA(1)
+We will also try auto.arima() for comparison.
+
+# Fit the models
+```{r}
+# Fit your 3 justified models
+fit1 <- Arima(y_train_bc,
+              order=c(0,1,1),
+              seasonal=list(order=c(0,1,1), period=7),
+              method="ML")
+
+fit2 <- Arima(y_train_bc,
+              order=c(1,1,1),
+              seasonal=list(order=c(0,1,1), period=7),
+              method="ML")
+
+fit3 <- Arima(y_train_bc,
+              order=c(0,1,2),
+              seasonal=list(order=c(0,1,1), period=7),
+              method="ML")
+
+fit_auto <- auto.arima(y_train_bc, seasonal=TRUE, stepwise=FALSE, approximation=FALSE)
+```
+# Residual Diagnostics
+```{r}
+library(lawstat)
+diagnose_model <- function(model, model_name = "Model") {
+  
+  cat("\n==============================\n")
+  cat(" Diagnostics for:", model_name, "\n")
+  cat("==============================\n\n")
+  
+  # Extract residuals
+  res <- residuals(model)
+  
+  #### 1. AIC / BIC ####
+  cat("AIC :", AIC(model), "\n")
+  cat("BIC :", BIC(model), "\n\n")
+  
+  #### 2. In-sample RMSE ####
+  rmse_in <- sqrt(mean(res^2, na.rm = TRUE))
+  cat("In-sample RMSE:", rmse_in, "\n\n")
+  
+  #### 3. Q-Q Plot of residuals ####
+  qqnorm(res, main = paste("Q-Q Plot:", model_name))
+  qqline(res, col = "red")
+  
+  #### 4. Runs test (Independence) ####
+  cat("\nRuns test for independence:\n")
+  print(runs.test(res))
+  
+  #### 6. Plot residuals + ACF ####
+  cat("\nResidual Diagnostics Plot:\n")
+  print(checkresiduals(model))
+  
+  cat("\n\n")
+  
+  # Return RMSE_in, AIC, BIC for building a comparison table
+  return(data.frame(
+    Model = model_name,
+    AIC = AIC(model),
+    BIC = BIC(model),
+    RMSE_in = rmse_in
+  ))
+}
+```
+```{r}
+diag1 <- diagnose_model(fit1, "SARIMA(0,1,1)(0,1,1)[7]")
+diag2 <- diagnose_model(fit2, "SARIMA(1,1,1)(0,1,1)[7]")
+diag3 <- diagnose_model(fit3, "SARIMA(0,1,2)(0,1,1)[7]")
+diag_auto <- diagnose_model(fit_auto, "auto.arima()")
+```
+```{r}
+comparison_table <- bind_rows(diag1, diag2, diag3, diag_auto)
+comparison_table
+```
+Box–Jenkins Model Selection
+
+We examined several SARIMA models motivated by the ACF and PACF of the Box–Cox–transformed and differenced series. Based on the identification step, we fit three candidate models:
+SARIMA(0,1,1)(0,1,1)[7]
+SARIMA(1,1,1)(0,1,1)[7]
+SARIMA(0,1,2)(0,1,1)[7]
+as well as the model selected by auto.arima().
+
+Each model was evaluated using:
+AIC and BIC
+In-sample RMSE
+Q–Q plot for normality
+Runs test for independence
+Ljung–Box test for residual autocorrelation
+
+The model SARIMA(0,1,1)(0,1,1)[7] performed poorly, failing both the runs test and the Ljung–Box test.
+The model SARIMA(1,1,1)(0,1,1)[7] showed improved diagnostics but still exhibited evidence of residual dependence.
+The auto.arima() model, ARIMA(1,1,1)(1,0,2)[7], achieved:
+Lowest AIC: 13042.75
+Lowest BIC: 13077.82
+Lowest in-sample RMSE: 3.096
+
+It also passed the Ljung–Box test (p = 0.149), indicating no remaining autocorrelation in the residuals. Although the runs test showed a mild deviation from randomness (p = 0.029), this is common for high-frequency time series and is acceptable given the strong performance in other diagnostics.
+
+Based on these criteria, ARIMA(1,1,1)(1,0,2)[7] was selected as the final Box–Jenkins model.
+
+# Forecast Test Set
+```{r}
+n_plot <- 30
+
+h <- length(y_test)
+
+fc1 <- forecast(fit1, h=h)
+fc2 <- forecast(fit2, h=h)
+fc3 <- forecast(fit3, h=h)
+fc_auto <- forecast(fit_auto, h=h)
+
+# Back-transform
+fc1_back <- InvBoxCox(fc1$mean, lambda)
+fc2_back <- InvBoxCox(fc2$mean, lambda)
+fc3_back <- InvBoxCox(fc3$mean, lambda)
+fc_auto_back <- InvBoxCox(fc_auto$mean, lambda)
+fc_lower <- InvBoxCox(fc_auto$lower[,"95%"], lambda)
+fc_upper <- InvBoxCox(fc_auto$upper[,"95%"], lambda)
+
+# Compute accuracy
+acc1 <- accuracy(fc1_back, y_test)
+acc2 <- accuracy(fc2_back, y_test)
+acc3 <- accuracy(fc3_back, y_test)
+acc_auto <- accuracy(fc_auto_back, y_test)
+
+acc1; acc2; acc3; acc_auto
+```
+```{r}
+df_plot <- data.frame(
+  date     = as.Date(test$trip_date[1:n_plot]),
+  actual   = y_test[1:n_plot],
+  forecast = as.numeric(fc_auto_back[1:n_plot]),
+  lower95  = as.numeric(fc_lower[1:n_plot]),
+  upper95  = as.numeric(fc_upper[1:n_plot])
+)
+```
+```{r}
+ggplot(df_plot, aes(x = date)) +
+  # 95% prediction interval band
+  geom_ribbon(aes(ymin = lower95, ymax = upper95),
+              fill = "lightblue", alpha = 0.4) +
+  # Forecast line
+  geom_line(aes(y = forecast), color = "blue", size = 1.2) +
+  # Actual values
+  geom_line(aes(y = actual), color = "black", size = 1.2) +
+  labs(
+    title = "First 30 Days of Test Set: Actual vs Forecast (95% PI)",
+    x = "Date",
+    y = "Daily Trips"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14)
+  )
+```
+```{r}
+final_reg <- readRDS("final_reg.rds")
+resid_reg <- residuals(final_reg)
+```
+```{r}
+
+# convert to ts with weekly frequency
+resid_ts <- ts(resid_reg, frequency = 7)
+
 library(forecast)
-fit_011_011 <- Arima(
-  y_ts,
-  order = c(0,1,1),
-  seasonal = c(0,1,1),
-  include.constant = FALSE
-)
-```
-```{r}
-summary(fit_011_011)
-AIC(fit_011_011) ; BIC(fit_011_011)
-```
-```{r}
-# This gives: residual ts plot, ACF, and Ljung–Box p-value
-checkresiduals(fit_011_011)
+ggtsdisplay(resid_ts, main = "ACF & PACF of Regression Residuals")
 
-# If you want explicit Ljung–Box:
-Box.test(
-  residuals(fit_011_011),
-  lag   = 21,         # or 28 if you want a few weekly cycles
-  type  = "Ljung-Box",
-  fitdf = length(coef(fit_011_011))         # q + Q = 1 + 1
-)
-qqnorm(residuals(fit_011_011));qqline(residuals(fit_011_011),col=2)
 ```
 
+```{r}
+resid_diff1 <- diff(resid_ts, differences = 1)
+ggtsdisplay(resid_diff1)
+```
+```{r}
+resid_diff2 <- diff(resid_diff1, lag = 7, differences = 1)
+ggtsdisplay(resid_diff2)
+```
+ACF after d = 1, D = 1 shows a large negative spike at lag 1 and at lag 7, with other lags inside the confidence bands, suggesting both a non-seasonal MA(1) and a seasonal MA(1) component. The PACF displays a gradually decaying pattern across lags 1–4 and a damped seasonal pattern at multiples of 7, which is consistent with an MA-type model rather than AR. Therefore, we considered SARIMA(1,1,1)(0,1,1)[7] as our primary candidate model for the regression residuals.
+```{r}
+fit_sarima_resid <- Arima(
+  resid_ts,
+  order = c(1,1,1),
+  seasonal = list(order = c(0,1,1), period = 7),
+  method = "ML"
+)
+
+summary(fit_sarima_resid)
+checkresiduals(fit_sarima_resid)
+```
 
 
 
