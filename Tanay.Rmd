@@ -1,0 +1,191 @@
+```{r}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(forecast)
+library(tseries)
+library(MASS)
+library(purrr)
+library(tibble)
+
+# Read and prep
+trips <- read.csv("trips_per_day.csv") %>%
+  mutate(trip_date = as.Date(trip_date)) %>%
+  arrange(trip_date)
+
+# Last 60 days of full dataset = test set for SARIMA
+val_h <- 60
+
+n_total <- nrow(trips)
+test_idx <- (n_total - val_h + 1):n_total
+
+train <- trips[-test_idx, ]         # all days except last 60
+test  <- trips[test_idx, ]          # last 60 days only
+
+# Time series with weekly seasonality (daily data, s = 7)
+y_raw <- train$n_trips
+y_ts  <- ts(y_raw, frequency = 7)
+
+# ----- Box–Cox transform -----
+bc <- boxcox(y_raw ~ 1, lambda = seq(-2, 2, by = 0.1))
+(lambda_opt <- bc$x[which.max(bc$y)])  # record this in your report
+
+lam <- lambda_opt
+
+# Apply Box–Cox transform
+if (lam == 0) {
+  y_trans <- log(y_ts)
+} else {
+  y_trans <- (y_ts^lam - 1) / lam
+}
+
+y_ts_weekly <- ts(y_trans, frequency = 7)
+y_ts_annual <- ts(y_trans,frequency=365)
+
+# Inverse Box–Cox helper for later
+inv_boxcox <- function(z, lambda) {
+  if (lambda == 0) {
+    return(exp(z))
+  } else {
+    base <- 1 + lambda * z
+    # Avoid negative / zero inside power
+    base[base <= 0] <- .Machine$double.eps
+    return(base^(1 / lambda))
+  }
+}
+
+K <- 5
+four_train <- fourier(y_ts_annual, K = K)
+four_test  <- fourier(y_ts_annual, K = K, h = val_h)
+```
+```{r}
+# Candidate models on Box–Cox transformed data
+fit_011 <- Arima(
+  y_ts_weekly,
+  order = c(0,1,1),
+  seasonal = c(0,1,1),
+  include.constant = FALSE,
+  xreg = four_train
+)
+
+fit_111 <- Arima(
+  y_ts_weekly,
+  order = c(1,1,1),
+  seasonal = c(0,1,1),
+  include.constant = FALSE,
+  xreg = four_train
+)
+
+fit_211 <- Arima(
+  y_ts_weekly,
+  order = c(2,1,1),
+  seasonal = c(0,1,1),
+  include.constant = FALSE,
+  xreg = four_train
+)
+```
+```{r}
+models <- list(
+  SARIMAX_011 = fit_011,
+  SARIMAX_111 = fit_111,
+  SARIMAX_211 = fit_211
+)
+```
+```{r}
+model_summary <- function(fit, name) {
+  res <- residuals(fit)
+  rmse <- sqrt(mean(res^2))
+  tibble(
+    Model = name,
+    AIC = AIC(fit),
+    BIC = BIC(fit),
+    RMSE_in = rmse
+  )
+}
+
+model_summaries <- map2_df(models, names(models), model_summary)
+model_summaries
+```
+
+```{r}
+# Example: residual diagnostics for SARIMA(0,1,1)(0,1,1)[7]
+checkresiduals(fit_011)
+qqnorm(residuals(fit_011)); qqline(residuals(fit_011), col = 2)
+
+# Repeat for others if needed:
+checkresiduals(fit_111)
+qqnorm(residuals(fit_111)); qqline(residuals(fit_111), col = 2)
+
+checkresiduals(fit_211)
+qqnorm(residuals(fit_211)); qqline(residuals(fit_211), col = 2)
+```
+Based on our residual diagnostics, we see that ARIMA(1,1,1)(0,1,1)[7] and ARIMA(1,1,1)(1,1,1)[7] perform very similarly according to their AIC,BIC,RMSE, LB P-value > 0.05 and no structure in their residual ACF. 
+Even though their is deviation in the tails, Box-Jenkins models do not have normality of residuals as a assumption and only require uncorrelated which we can get from the ACF's.
+
+Based on the rule of Parsimony, we prefer a model that is simpler when performance is similar so we will choose ARIMA(1,1,1)(0,1,1)[7].
+
+```{r}
+fit_best <- fit_111
+h <- nrow(test)
+h
+```
+```{r}
+fc_best <- forecast(fit_best, h = h,xreg=four_test)
+```
+```{r}
+# Extract point forecasts and intervals on original scale
+mean_bc   <- as.numeric(fc_best$mean)
+lower95_bc <- as.numeric(fc_best$lower[, "95%"])
+upper95_bc <- as.numeric(fc_best$upper[, "95%"])
+```
+```{r}
+# Back-transform
+fc_df <- data.frame(
+  trip_date = test$trip_date,
+  forecast  = inv_boxcox(mean_bc, lam),
+  lower95   = inv_boxcox(lower95_bc, lam),
+  upper95   = inv_boxcox(upper95_bc, lam),
+  actual    = test$n_trips
+)
+
+# Sanity: no negative forecasts
+fc_df <- fc_df %>%
+  mutate(across(c(forecast, lower95, upper95),
+                ~ pmax(., 0)))
+```
+```{r}
+y_true <- fc_df$actual
+y_pred <- fc_df$forecast
+
+# Filter valid indices
+nonzero_idx <- which(y_true > 0 & !is.na(y_true) & !is.na(y_pred))
+
+if (length(nonzero_idx) == 0) {
+  mape_test <- NA   # cannot compute MAPE
+} else {
+  mape_test <- mean(abs((y_true[nonzero_idx] - y_pred[nonzero_idx]) / 
+                          y_true[nonzero_idx])) * 100
+}
+
+rmse_test <- sqrt(mean((y_pred - y_true)^2, na.rm = TRUE))
+mae_test  <- mean(abs(y_pred - y_true), na.rm = TRUE)
+
+nonzero_idx <- which(y_true > 0)
+
+rmse_test; mae_test; mape_test
+```
+```{r}
+ggplot(fc_df, aes(x = trip_date)) +
+  geom_ribbon(aes(ymin = lower95, ymax = upper95), alpha = 0.15) +
+  geom_line(aes(y = actual), colour = "black", size = 0.7) +
+  geom_line(aes(y = forecast), colour = "blue", size = 0.8) +
+  labs(
+    title = paste0("SARIMA(1,1,1)(0,1,1)[7]", " – Forecast vs Actual (Test Period)"),
+    x = "Date",
+    y = "Daily Trips"
+  ) +
+  theme_minimal()
+```
+
+
+

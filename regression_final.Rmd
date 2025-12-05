@@ -321,7 +321,6 @@ final_train_data <- data.frame(
 # 4. Fit the model
 # This creates the 'final_reg' object the next chunk is looking for
 final_reg <- lm(y ~ ., data = final_train_data)
-saveRDS(final_reg, "final_reg.rds")
 
 # Check summary to confirm it worked
 summary(final_reg)
@@ -617,4 +616,14 @@ lines(test_data$trip_date, preds_2024, col = "red", lwd = 2)
 legend("topright", legend = c("Actual 2024 Data", "OLS Forecast"), 
        col = c("gray", "red"), lty = 1, lwd = 2)
 ```
+```{r}
+saveRDS(final_reg, "final_reg.rds")
+saveRDS(final_train_data, "final_train_data.rds")
+saveRDS(final_test_data, "final_test_data.rds")
+saveRDS(poly_basis_final, "poly_basis_final.rds")
+saveRDS(test_data, "test_data_processed.rds")
+saveRDS(lam, "boxcox_lambda.rds")
+
+```
+
 
