@@ -294,31 +294,142 @@ resid_reg <- residuals(final_reg)
 resid_ts <- ts(resid_reg, frequency = 7)
 
 library(forecast)
-ggtsdisplay(resid_ts, main = "ACF & PACF of Regression Residuals")
+library(ggplot2)
+library(patchwork)
+p_ts <- autoplot(resid_ts) +
+  ggtitle("Residuals")
 
+p_acf <- ggAcf(resid_ts) +
+  ggtitle("ACF")
+
+p_pacf <- ggPacf(resid_ts) +
+  ggtitle("PACF")
+
+(p_ts / (p_acf | p_pacf)) +
+  plot_annotation(title = "ACF & PACF of Regression Residuals")
+```
+```{r}
+# Determine Order of Seasonal and Non-Seasonal Lags
+trend_lag <- ndiffs(resid_ts)
+seasonal_lag <- ndiffs(resid_ts,m=7)
+trend_lag ; seasonal_lag
 ```
 
 ```{r}
-resid_diff1 <- diff(resid_ts, differences = 1)
+resid_diff1 <- diff(resid_ts, differences = trend_lag)
 ggtsdisplay(resid_diff1)
 ```
 ```{r}
-resid_diff2 <- diff(resid_diff1, lag = 7, differences = 1)
-ggtsdisplay(resid_diff2)
+resid_diff2 <- diff(resid_diff1, lag = 7, differences = seasonal_lag)
+ts_diff_plot   <- autoplot(resid_diff2) +
+  ggtitle("Seasonally Differenced Residuals")
+
+acf_diff_plot  <- ggAcf(resid_diff2) +
+  ggtitle("ACF")
+
+pacf_diff_plot <- ggPacf(resid_diff2) +
+  ggtitle("PACF")
+
+# Combine into a layout similar to ggtsdisplay()
+(ts_diff_plot / (acf_diff_plot | pacf_diff_plot)) +
+  plot_annotation(title = "ACF & PACF of Seasonal & Non-Seasonal Differenced Residuals")
 ```
-ACF after d = 1, D = 1 shows a large negative spike at lag 1 and at lag 7, with other lags inside the confidence bands, suggesting both a non-seasonal MA(1) and a seasonal MA(1) component. The PACF displays a gradually decaying pattern across lags 1–4 and a damped seasonal pattern at multiples of 7, which is consistent with an MA-type model rather than AR. Therefore, we considered SARIMA(1,1,1)(0,1,1)[7] as our primary candidate model for the regression residuals.
+After differencing d=1 and D=1, we get our stationary version of the residuals.
+Looking at the non-seasonal part, we see from the ACF there is a strong spike at lag 1, then basically noise. For the PACF, it's gradually decaying at short lags. This is MA(1) behavior but also could be AR(1) behavior because I think the lag 1 of the PACF might be strong so p = {0,1} and q = 1.
+
+As for the seasonal parts, in the ACF, I see a big lag at 7 and the other seasonal lags are within the confidence bands.For the PACF, we see at spike at Lag 7 that decays seasonally. So will pick P = 0 and Q = 1.
 ```{r}
-fit_sarima_resid <- Arima(
-  resid_ts,
-  order = c(1,1,1),
-  seasonal = list(order = c(0,1,1), period = 7),
-  method = "ML"
-)
+model1 <- Arima(resid_ts,
+              order=c(0,1,1),
+              seasonal=list(order=c(0,1,1), period=7),
+              method="ML")
 
-summary(fit_sarima_resid)
-checkresiduals(fit_sarima_resid)
+model2 <- Arima(resid_ts,
+              order=c(1,1,1),
+              seasonal=list(order=c(0,1,1), period=7),
+              method="ML")
+model_auto <- auto.arima(resid_ts, seasonal=TRUE, stepwise=FALSE, approximation=FALSE)
+```
+```{r}
+diagnostics1 <- diagnose_model(model1, "SARIMA(0,1,1)(0,1,1)[7]")
+diagnostics2 <- diagnose_model(model2, "SARIMA(1,1,1)(0,1,1)[7]")
+diagnosticsauto <- diagnose_model(model_auto, "auto.arima()")
+```
+We fit several SARIMA models to the regression residuals, including SARIMA(0,1,1)(0,1,1)_7, SARIMA(1,1,1)(0,1,1)_7, and the model selected by auto.arima(), ARIMA(1,1,1)(1,0,1)_7. The SARIMA(0,1,1)(0,1,1)_7 model performed poorly, with very low p-values in the Ljung–Box and runs tests, indicating substantial residual autocorrelation and non-randomness.
+
+Both SARIMA(1,1,1)(0,1,1)_7 and ARIMA(1,1,1)(1,0,1)_7 showed similar mostly-stationary residual ACF/PACF patterns. The auto.arima model achieved slightly lower AIC/BIC and in-sample RMSE, but its residuals exhibited stronger remaining autocorrelation (Ljung–Box p ≈ 0.002). In contrast, SARIMA(1,1,1)(0,1,1)_7 provided a good compromise between fit and parsimony, with substantially improved diagnostics (runs test p ≈ 0.097 and Ljung–Box p ≈ 0.014).
+
+Given the large sample size, the Ljung–Box test is highly sensitive to very small deviations from white noise, so we prioritized a simpler model with cleaner residual structure over a marginal reduction in AIC. We therefore selected SARIMA(1,1,1)(0,1,1)_7 as the final Box–Jenkins model for the regression residuals.
+
+```{r}
+# Load RDS Files
+final_train_data <- readRDS("final_train_data.rds")
+final_test_data <- readRDS("final_test_data.rds")
+poly_basis_final <- readRDS("poly_basis_final.rds")
+test_data <- readRDS("test_data_processed.rds")
+lam <- readRDS("boxcox_lambda.rds")
+```
+```{r}
+reg_forecast_trans <- predict(final_reg, newdata = final_test_data)
+```
+```{r}
+h <- nrow(final_test_data)
+
+sarima_fc <- forecast(model2, h = h)
+sarima_resid_forecast <- sarima_fc$mean
+```
+```{r}
+hybrid_forecast_trans <- reg_forecast_trans + sarima_resid_forecast
+```
+```{r}
+hybrid_forecast <- InvBoxCox(hybrid_forecast_trans, lambda = lam)
+actual_2024 <- InvBoxCox(final_test_data$y, lambda = lam)
 ```
 
+```{r}
+accuracy_hybrid <- accuracy(hybrid_forecast, actual_2024)
+```
+```{r}
+plot(test_data$trip_date, actual_2024, type = "l", col = "gray", lwd = 2,
+     main = "2024 Forecast vs Actuals (OLS)", ylab = "Transformed Trips", xlab = "Date")
+lines(test_data$trip_date, hybrid_forecast, col = "red", lwd = 2)
+legend("topright", legend = c("Actual 2024 Data", "Hybrid Forecast"), 
+       col = c("gray", "red"), lty = 1, lwd = 2)
+```
+```{r}
+apse_test <- mean((actual_2024 - hybrid_forecast)^2)
+```
+```{r}
+accuracy_hybrid
+```
+```{r}
+library(knitr)
+accuracy_hybrid_df <- as.data.frame(accuracy_hybrid)
 
+accuracy_hybrid_df$APSE <- apse_test
 
+print(accuracy_hybrid_df, row.names = FALSE)
+```
+
+Interpreting each accuracy number:
+1. ME
+The combined mode on average over-forecasts the true daily trips by about 7900 trips per day which indicates large bias and systematic overprediction.
+2. RMSE
+My forecasts are off by about 10,100 trips on a typical data but since the daily demand ranges from 3000 to 40000, this magnitude may or may not be large depending on seasonaly volatility
+3. MAE
+As for the Average absolute error in trips, the model is off by 8200 trips per day.
+4. MPE
+This model over predicts by 32% on average
+5. MAPE
+A typical day's forecast is about 38% off.
+
+This means our combined regression + SARIMA residual model is strongly biased, with high error relative to the actual values which means it's not capturing 2024 behavior well and it doesn't provide any meaningful improvement over the regression-only forecasting.
+
+So why is this error so high?
+1. Something in 2024 changed structurally, so it's not generalizing well to 2024.
+2. The regression model might be overfitting seasonal factors and even though we did CV, the categorical seasonality may not extrapolate well to 2024.
+3. Even for the sarima model we picked, it had a Ljung-Box p-value close to 0.01 which is still non-white noise.
+4. Also since we calculated accuracy on the Box-Cox inverse transformation, it may be producing upward bias since it can inflate predictions when residual variance is large. Also the inverse Box-Cox is biased when forecasting which is causing this issue of overforecasting.
+
+I think we should add weather data since BikeShare data is extremely weather-driven and omitting the temperature, rainy days or snowy days will inflate the forecast error. 
 

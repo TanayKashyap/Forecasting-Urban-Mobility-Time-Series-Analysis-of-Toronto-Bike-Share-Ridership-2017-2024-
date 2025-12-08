@@ -5,6 +5,9 @@ library(MASS)
 library(car)
 library(randtests)
 library(forecast)
+library(tseries)
+library(glmnet)
+library(patchwork)
 
 ## -------------------------------------------------------------------------
 ## DATA WRANGLING: Professor, you will not be able to run this portion as
@@ -325,7 +328,6 @@ final_train_data <- data.frame(
 
 # Fit the model
 final_reg <- lm(y ~ ., data = final_train_data)
-saveRDS(final_reg, "final_reg.rds")
 
 summary(final_reg)
 
@@ -499,3 +501,144 @@ RegressionDiagnosicsPlots(final_reg)
 
 # Generate Formal Tests
 RegressionDiagnosicsTests(final_reg)
+
+
+## ------------------------------------------------------------------------- ##
+## Regression + SARIMA Model                                                 ##
+## ------------------------------------------------------------------------- ##
+print("Hybrid SARIMA analysis on Regression Residuals")
+
+# Extract residuals from the OLS model
+resid_reg <- residuals(final_reg)
+
+# Convert to TS with weekly frequency (Seasonality = 7 days)
+resid_ts <- ts(resid_reg, frequency = 7)
+
+# Visualizing Residuals ACF/PACF
+p_ts <- autoplot(resid_ts) + ggtitle("Residuals")
+p_acf <- ggAcf(resid_ts) + ggtitle("ACF")
+p_pacf <- ggPacf(resid_ts) + ggtitle("PACF")
+
+print((p_ts / (p_acf | p_pacf)) + plot_annotation(title = "ACF & PACF of Regression Residuals"))
+
+# Determine Order of Seasonal and Non-Seasonal Lags
+trend_lag <- ndiffs(resid_ts)
+seasonal_lag <- ndiffs(resid_ts, m=7)
+print(paste("Recommended trend diffs:", trend_lag, "| Seasonal diffs:", seasonal_lag))
+
+# Differencing analysis
+
+## Trend Differencing
+resid_diff1 <- diff(resid_ts, differences = trend_lag)
+
+## Seasonal Differencing
+resid_diff2 <- diff(resid_diff1, lag = 7, differences = max(1, seasonal_lag))
+
+ts_diff_plot   <- autoplot(resid_diff2) + ggtitle("Seasonally Differenced Residuals")
+acf_diff_plot  <- ggAcf(resid_diff2) + ggtitle("ACF")
+pacf_diff_plot <- ggPacf(resid_diff2) + ggtitle("PACF")
+
+# Plot PACF + ACF of Differenced Residuals
+print((ts_diff_plot / (acf_diff_plot | pacf_diff_plot)) +
+        plot_annotation(title = "ACF & PACF of Seasonal & Non-Seasonal Differenced Residuals"))
+
+# Fit SARIMA Models to Residuals
+print("Fitting SARIMA models to residuals...")
+
+# Model 1: SARIMA(0,1,1)(0,1,1)[7]
+model1 <- Arima(resid_ts,
+                order=c(0,1,1),
+                seasonal=list(order=c(0,1,1), period=7),
+                method="ML")
+
+# Model 2: SARIMA(1,1,1)(0,1,1)[7]
+model2 <- Arima(resid_ts,
+                order=c(1,1,1),
+                seasonal=list(order=c(0,1,1), period=7),
+                method="ML")
+
+# Model 3: Auto ARIMA
+model_auto <- auto.arima(resid_ts, seasonal=TRUE, stepwise=FALSE, approximation=FALSE)
+
+# Diagnostic Function from 443.Rmd
+diagnose_model <- function(model, model_name = "Model") {
+  cat("\n==============================\n")
+  cat(" Diagnostics for:", model_name, "\n")
+  cat("==============================\n\n")
+  
+  res <- residuals(model)
+  
+  cat("AIC :", AIC(model), "\n")
+  cat("BIC :", BIC(model), "\n")
+  rmse_in <- sqrt(mean(res^2, na.rm = TRUE))
+  cat("In-sample RMSE:", rmse_in, "\n")
+  
+  print(checkresiduals(model))
+  
+  return(data.frame(
+    Model = model_name,
+    AIC = AIC(model),
+    BIC = BIC(model),
+    RMSE_in = rmse_in
+  ))
+}
+
+diag1 <- diagnose_model(model1, "SARIMA(0,1,1)(0,1,1)[7]")
+diag2 <- diagnose_model(model2, "SARIMA(1,1,1)(0,1,1)[7]")
+diag_auto <- diagnose_model(model_auto, "auto.arima()")
+
+comparison_table <- bind_rows(diag1, diag2, diag_auto)
+print(comparison_table)
+
+print("Selected Model for Hybrid Forecasting: SARIMA(1,1,1)(0,1,1)[7] (Model 2)")
+
+## -------------------------------------------------------------------------
+## HYBRID FORECASTING (2024 Test Set)
+## -------------------------------------------------------------------------
+
+# Create Test Data
+test_data_2024 <- subset(bike, trip_date >= "2024-01-01")
+
+# Create polynomial basis like for Train Data
+poly_basis_test <- poly(test_data_2024$time_index, 1, raw = TRUE)
+
+final_test_data <- data.frame(
+  y = test_data_2024$y_trans, # Actual transformed values
+  poly = poly_basis_test,
+  month = test_data_2024$month_fac,
+  weekday = test_data_2024$weekday_fac,
+  sin_year = test_data_2024$sin_year
+)
+
+# Forecast Regression Component
+reg_forecast_trans <- predict(final_reg, newdata = final_test_data)
+
+# Forecast Residual Component (SARIMA)
+h <- nrow(final_test_data)
+sarima_fc <- forecast(model2, h = h)
+sarima_resid_forecast <- sarima_fc$mean
+
+# Combine Components
+hybrid_forecast_trans <- reg_forecast_trans + sarima_resid_forecast
+
+# Inverse Transformation (Box-Cox)
+hybrid_forecast <- InvBoxCox(hybrid_forecast_trans, lambda = lam)
+actual_2024 <- InvBoxCox(final_test_data$y, lambda = lam)
+
+# Evaluate Accuracy
+accuracy_hybrid <- accuracy(hybrid_forecast, actual_2024)
+apse_test <- mean((actual_2024 - hybrid_forecast)^2)
+
+accuracy_hybrid_df <- as.data.frame(accuracy_hybrid)
+accuracy_hybrid_df$APSE <- apse_test
+
+print("Hybrid Model Accuracy (2024):")
+print(accuracy_hybrid_df)
+
+# Final Plot: 2024 Forecast vs Actuals
+plot(test_data_2024$trip_date, actual_2024, type = "l", col = "gray", lwd = 2,
+     main = "2024 Forecast vs Actuals (Hybrid OLS + SARIMA)", 
+     ylab = "Number of Trips", xlab = "Date")
+lines(test_data_2024$trip_date, hybrid_forecast, col = "red", lwd = 2)
+legend("topright", legend = c("Actual 2024 Data", "Hybrid Forecast"), 
+       col = c("gray", "red"), lty = 1, lwd = 2)
