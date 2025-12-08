@@ -289,11 +289,15 @@ for (p in 1:max_degree) {
       month = cv_data$month_fac[test_idx],
       weekday = cv_data$weekday_fac[test_idx],
       sin_year = cv_data$sin_year[test_idx]    )
+    # Fit Model
     fit <- lm(y ~ ., data = x_train)
     
+    # Predict on transformed scale
     preds <- predict(fit, newdata = x_test)
     
-    errors <- c(errors, (cv_data$y_trans[test_idx] - preds)^2)
+    preds_raw  <- inv_boxcox(preds, lam)
+    actual_raw <- cv_data$n_trips[test_idx]
+    errors <- c(errors, (actual_raw - preds_raw)^2)
   }
   
   results_poly$APSE[p] <- mean(errors)
