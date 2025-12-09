@@ -153,7 +153,7 @@ bike <- bike %>%
 train_seas <- subset(bike, trip_date < "2023-01-01")
 valid_seas <- subset(bike, trip_date >= "2023-01-01")
 
-# Model Fitting
+# --- Model Fitting ---
 
 # 1. Trend + Fourier Only
 mod1 <- lm(y_trans ~ time_index + sin_year , data = train_seas)
@@ -171,38 +171,55 @@ mod4 <- lm(y_trans ~ time_index + sin_year  + month_fac + is_weekend, data = tra
 mod5 <- lm(y_trans ~ time_index + sin_year  + month_fac + weekday_fac, data = train_seas)
 
 
-# Model Eval
+# invert the boxcox
 
-# 
-evaluate_model <- function(model, train_df, valid_df) {
-  # predictions on validation set
-  preds <- predict(model, newdata = valid_df)
+inv_boxcox <- function(z, lambda) {
+  if (lambda == 0) {
+    # inverse of log
+    return(exp(z))
+  } else if (lambda > 0) {
+    # inverse of (y^λ - 1)/λ
+    return(((lambda * z) + 1)^(1 / lambda))
+  } else {
+    # you used: y_trans = -(y^λ)
+    # so y^λ = -y_trans  →  y = (-y_trans)^(1/λ)
+    return((-z)^(1 / lambda))
+  }
+}
+
+
+# --- Model Evaluation ---
+
+# Function to calculate evaluation metrics
+evaluate_model <- function(model, train_df, valid_df, lambda) {
+  # Predictions on validation set (still on transformed scale)
+  preds_trans <- predict(model, newdata = valid_df)
   
-  # APSE 
-  apse <- mean((valid_df$y_trans - preds)^2)
+  # Back-transform predictions AND actuals to raw scale
+  preds_raw   <- inv_boxcox(preds_trans, lambda)
+  actual_raw  <- valid_df$n_trips   # original outcome
   
-  # Number of parameters
+  # APSE on raw scale
+  apse <- mean((actual_raw - preds_raw)^2)
+  
+  # Number of parameters (k): coefficients (beta) + 1 (sigma)
   num_params <- length(coef(model)) + 1 
   
-  # AICc
   n <- nrow(train_df)
   aicc <- AIC(model) + (2 * num_params * (num_params + 1)) / (n - num_params - 1)
-  
-  # Adjusted R-squared
   adj_r2 <- summary(model)$adj.r.squared
-  
   n_coeffs <- length(coef(model))
   
   return(c(APSE = apse, AICc = aicc, Adj_R2 = adj_r2, Num_Params = n_coeffs))
 }
 
-# Collect results
+
 results <- rbind(
-  "Trend + Fourier" = evaluate_model(mod1, train_seas, valid_seas),
-  "Trend + Fourier + DayOfWeek" = evaluate_model(mod2, train_seas, valid_seas),
-  "Trend + Fourier + Month" = evaluate_model(mod3, train_seas, valid_seas),
-  "Trend + Fourier + Month + Weekend" = evaluate_model(mod4, train_seas, valid_seas),
-  "Trend + Fourier + Month + DayOfWeek" = evaluate_model(mod5, train_seas, valid_seas)
+  "Trend + Fourier" = evaluate_model(mod1, train_seas, valid_seas, lam),
+  "Trend + Fourier + DayOfWeek" = evaluate_model(mod2, train_seas, valid_seas, lam),
+  "Trend + Fourier + Month" = evaluate_model(mod3, train_seas, valid_seas, lam),
+  "Trend + Fourier + Month + Weekend" = evaluate_model(mod4, train_seas, valid_seas, lam),
+  "Trend + Fourier + Month + DayOfWeek" = evaluate_model(mod5, train_seas, valid_seas, lam)
 )
 
 print("Model Evaluation Results:")
