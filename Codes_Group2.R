@@ -510,7 +510,6 @@ RegressionDiagnosicsTests(final_reg)
 ## ------------------------------------------------------------------------- ##
 ## Regression + SARIMA Model                                                 ##
 ## ------------------------------------------------------------------------- ##
-print("Hybrid SARIMA analysis on Regression Residuals")
 
 # Extract residuals from the OLS model
 resid_reg <- residuals(final_reg)
@@ -530,8 +529,6 @@ trend_lag <- ndiffs(resid_ts)
 seasonal_lag <- ndiffs(resid_ts, m=7)
 print(paste("Recommended trend diffs:", trend_lag, "| Seasonal diffs:", seasonal_lag))
 
-# Differencing analysis
-
 ## Trend Differencing
 resid_diff1 <- diff(resid_ts, differences = trend_lag)
 
@@ -545,9 +542,6 @@ pacf_diff_plot <- ggPacf(resid_diff2) + ggtitle("PACF")
 # Plot PACF + ACF of Differenced Residuals
 print((ts_diff_plot / (acf_diff_plot | pacf_diff_plot)) +
         plot_annotation(title = "ACF & PACF of Seasonal & Non-Seasonal Differenced Residuals"))
-
-# Fit SARIMA Models to Residuals
-print("Fitting SARIMA models to residuals...")
 
 # Model 1: SARIMA(0,1,1)(0,1,1)[7]
 model1 <- Arima(resid_ts,
@@ -607,7 +601,7 @@ test_data_2024 <- subset(bike, trip_date >= "2024-01-01")
 poly_basis_test <- poly(test_data_2024$time_index, 1, raw = TRUE)
 
 final_test_data <- data.frame(
-  y = test_data_2024$y_trans, # Actual transformed values
+  y = test_data_2024$y_trans,
   poly = poly_basis_test,
   month = test_data_2024$month_fac,
   weekday = test_data_2024$weekday_fac,
@@ -633,6 +627,7 @@ actual_2024 <- InvBoxCox(final_test_data$y, lambda = lam)
 accuracy_hybrid <- accuracy(hybrid_forecast, actual_2024)
 apse_test <- mean((actual_2024 - hybrid_forecast)^2)
 
+# Add APSE to df
 accuracy_hybrid_df <- as.data.frame(accuracy_hybrid)
 accuracy_hybrid_df$APSE <- apse_test
 
@@ -649,7 +644,9 @@ legend("topright", legend = c("Actual 2024 Data", "Hybrid Forecast"),
 
 
 
-# Holt Winters 
+## -------------------------------------------------------------------------
+## Holt-Winters
+## -------------------------------------------------------------------------
 
 data <- read.csv("trips_per_day.csv")
 data$trip_date <- as.Date(data$trip_date)
